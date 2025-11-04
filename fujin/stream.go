@@ -13,6 +13,7 @@ import (
 
 	"github.com/fujin-io/fujin-go/correlator"
 	"github.com/fujin-io/fujin-go/fujin/pool"
+	v1 "github.com/fujin-io/fujin/public/proto/fujin/v1"
 	"github.com/quic-go/quic-go"
 )
 
