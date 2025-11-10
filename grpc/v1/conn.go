@@ -47,6 +47,11 @@ func NewConn(addr string, logger *slog.Logger, opts ...grpc.DialOption) (Conn, e
 
 // Connect creates a new stream with the given ID
 func (c *conn) Connect(id string) (Stream, error) {
+	return c.ConnectWith(id, nil)
+}
+
+// ConnectWith creates a new stream with the given ID and config
+func (c *conn) ConnectWith(id string, cfg *StreamConfig) (Stream, error) {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -61,7 +66,7 @@ func (c *conn) Connect(id string) (Stream, error) {
 		return existingStream, nil
 	}
 
-	stream, err := newStream(c.client, id, c.logger)
+	stream, err := newStream(c.client, id, c.logger, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stream: %w", err)
 	}

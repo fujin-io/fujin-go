@@ -4,6 +4,7 @@ import "github.com/fujin-io/fujin-go/models"
 
 type Conn interface {
 	Connect(id string) (Stream, error)
+	ConnectWith(id string, cfg *StreamConfig) (Stream, error)
 	Close() error
 }
 

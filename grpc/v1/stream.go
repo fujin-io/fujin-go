@@ -14,6 +14,10 @@ import (
 	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
 )
 
+const (
+	defaultRPCWait = 10 * time.Second
+)
+
 // stringToBytes converts string to []byte without allocation using unsafe.
 // The returned byte slice must not be modified as it shares underlying data with the string.
 func stringToBytes(s string) []byte {
@@ -45,6 +49,12 @@ type stream struct {
 
 	correlationID atomic.Uint32
 
+	// config
+	rpcWait         time.Duration
+	backoffInitial  time.Duration
+	backoffMax      time.Duration
+	backoffMultiple float64
+
 	produceCorrelator     *correlator.Correlator[error]
 	subscribeCorrelator   *correlator.Correlator[uint32]
 	hsubscribeCorrelator  *correlator.Correlator[uint32]
@@ -69,8 +79,21 @@ type stream struct {
 	wg sync.WaitGroup
 }
 
+// ReconnectBackoff defines reconnection backoff policy
+type ReconnectBackoff struct {
+	Initial    time.Duration
+	Max        time.Duration
+	Multiplier float64
+}
+
+// StreamConfig configures stream timeouts and reconnection policy
+type StreamConfig struct {
+	RPCWait time.Duration
+	Backoff ReconnectBackoff
+}
+
 // newStream creates a new stream
-func newStream(client pb.FujinServiceClient, streamID string, logger *slog.Logger) (*stream, error) {
+func newStream(client pb.FujinServiceClient, streamID string, logger *slog.Logger, cfg *StreamConfig) (*stream, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &stream{
@@ -82,6 +105,10 @@ func newStream(client pb.FujinServiceClient, streamID string, logger *slog.Logge
 		responseDone:          make(chan struct{}),
 		ctx:                   ctx,
 		cancel:                cancel,
+		rpcWait:               defaultRPCWait,
+		backoffInitial:        200 * time.Millisecond,
+		backoffMax:            5 * time.Second,
+		backoffMultiple:       2.0,
 		produceCorrelator:     correlator.New[error](),
 		subscribeCorrelator:   correlator.New[uint32](),
 		hsubscribeCorrelator:  correlator.New[uint32](),
@@ -93,6 +120,22 @@ func newStream(client pb.FujinServiceClient, streamID string, logger *slog.Logge
 		unsubscribeCorrelator: correlator.New[error](),
 		ackCorrelator:         correlator.New[models.AckResult](),
 		nackCorrelator:        correlator.New[models.NackResult](),
+	}
+
+	// apply config if provided
+	if cfg != nil {
+		if cfg.RPCWait > 0 {
+			s.rpcWait = cfg.RPCWait
+		}
+		if cfg.Backoff.Initial > 0 {
+			s.backoffInitial = cfg.Backoff.Initial
+		}
+		if cfg.Backoff.Max > 0 {
+			s.backoffMax = cfg.Backoff.Max
+		}
+		if cfg.Backoff.Multiplier > 0 {
+			s.backoffMultiple = cfg.Backoff.Multiplier
+		}
 	}
 
 	if err := s.start(); err != nil {
@@ -132,7 +175,6 @@ func (s *stream) start() error {
 	select {
 	case resp := <-s.responseCh:
 		if connectResp, ok := resp.Response.(*pb.FujinResponse_Connect); ok {
-			fmt.Println("connect response", connectResp)
 			if connectResp.Connect.CorrelationId == correlationID {
 				if connectResp.Connect.Error != "" {
 					return fmt.Errorf("connect error: %s", connectResp.Connect.Error)
@@ -143,7 +185,7 @@ func (s *stream) start() error {
 			}
 		}
 		return fmt.Errorf("unexpected connect response")
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		return fmt.Errorf("connect timeout")
 	case <-s.ctx.Done():
 		return s.ctx.Err()
@@ -160,10 +202,8 @@ func (s *stream) readResponses() {
 		case <-s.ctx.Done():
 			return
 		default:
-			fmt.Println("reading response")
 			resp, err := s.grpcStream.Recv()
 			if err != nil {
-				fmt.Println("error reading response", err)
 				if s.ctx.Err() != nil || s.closed.Load() {
 					return
 				}
@@ -174,13 +214,11 @@ func (s *stream) readResponses() {
 					s.logger.Error("reconnect failed, stopping stream", "error", err)
 					return
 				}
-				fmt.Println("reconnected successfully")
 				// on successful reconnect continue loop to Recv() on new stream
 				continue
 			}
 
 			s.routeResponse(resp)
-			fmt.Println("routed response")
 		}
 	}
 }
@@ -189,8 +227,8 @@ func (s *stream) readResponses() {
 func (s *stream) reconnectWithBackoff() error {
 	s.connected.Store(false)
 
-	// simple exponential backoff: 200ms -> 3.2s (cap 5s), total until ctx done
-	backoff := 200 * time.Millisecond
+	// exponential backoff using configured policy
+	backoff := s.backoffInitial
 	for {
 		if s.ctx.Err() != nil || s.closed.Load() {
 			return s.ctx.Err()
@@ -198,10 +236,10 @@ func (s *stream) reconnectWithBackoff() error {
 
 		if err := s.reconnectOnce(); err != nil {
 			s.logger.Warn("reconnect attempt failed", "error", err)
-			if backoff < 5*time.Second {
-				backoff *= 2
-				if backoff > 5*time.Second {
-					backoff = 5 * time.Second
+			if backoff < s.backoffMax {
+				backoff = time.Duration(float64(backoff) * s.backoffMultiple)
+				if backoff > s.backoffMax {
+					backoff = s.backoffMax
 				}
 			}
 			select {
@@ -224,7 +262,6 @@ func (s *stream) reconnectOnce() error {
 	if err != nil {
 		return fmt.Errorf("create grpc stream: %w", err)
 	}
-	fmt.Println("created gRPC stream on reconnect", grpcStream)
 	s.grpcStream = grpcStream
 
 	// send CONNECT again
@@ -240,13 +277,11 @@ func (s *stream) reconnectOnce() error {
 	if err := grpcStream.Send(connectReq); err != nil {
 		return fmt.Errorf("send connect: %w", err)
 	}
-	fmt.Println("sent connect request on reconnect", connectReq)
 
-	resp, err := grpcStream.Recv()
+	_, err = grpcStream.Recv()
 	if err != nil {
 		return fmt.Errorf("receive connect response: %w", err)
 	}
-	fmt.Println("received connect response on reconnect", resp)
 
 	s.connected.Store(true)
 	s.logger.Info("stream reconnected")
@@ -264,8 +299,6 @@ func (s *stream) resubscribeAll() error {
 		subs = append(subs, sub)
 	}
 	s.subsMu.RUnlock()
-
-	fmt.Println("resubscribing", len(subs), "subscriptions")
 
 	for _, sub := range subs {
 		if sub.closed.Load() {
@@ -297,7 +330,6 @@ func (s *stream) resubscribeAll() error {
 		if err != nil {
 			return fmt.Errorf("receive resubscribe response: %w", err)
 		}
-		fmt.Println("received resubscribe response", resp)
 
 		if subscribeResp, ok := resp.Response.(*pb.FujinResponse_Subscribe); ok {
 			newID := subscribeResp.Subscribe.SubscriptionId
@@ -336,7 +368,6 @@ func (s *stream) resubscribeAll() error {
 		}
 	}
 
-	fmt.Println("resubscribed all subscriptions")
 	return nil
 }
 
@@ -533,7 +564,7 @@ func (s *stream) produce(topic string, p []byte) error {
 	case err := <-ch:
 		s.produceCorrelator.Delete(correlationID)
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.produceCorrelator.Delete(correlationID)
 		return fmt.Errorf("produce timeout")
 	case <-s.ctx.Done():
@@ -588,7 +619,7 @@ func (s *stream) hproduce(topic string, p []byte, headers map[string]string) err
 	case err := <-ch:
 		s.produceCorrelator.Delete(correlationID)
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.produceCorrelator.Delete(correlationID)
 		return fmt.Errorf("hproduce timeout")
 	case <-s.ctx.Done():
@@ -655,7 +686,7 @@ func (s *stream) subscribe(topic string, autoCommit bool, handler func(msg model
 
 		s.logger.Info("subscribed to topic", "topic", topic, "subscription_id", subscriptionID)
 		return subscriptionID, nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.subscribeCorrelator.Delete(correlationID)
 		return 0, fmt.Errorf("subscribe timeout")
 	case <-s.ctx.Done():
@@ -722,7 +753,7 @@ func (s *stream) hsubscribe(topic string, autoCommit bool, handler func(msg mode
 
 		s.logger.Info("hsubscribed to topic", "topic", topic, "subscription_id", subscriptionID)
 		return subscriptionID, nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.hsubscribeCorrelator.Delete(correlationID)
 		return 0, fmt.Errorf("hsubscribe timeout")
 	case <-s.ctx.Done():
@@ -769,7 +800,7 @@ func (s *stream) fetch(topic string, autoCommit bool, batchSize uint32) (models.
 	case result := <-ch:
 		s.fetchCorrelator.Delete(correlationID)
 		return result, result.Error
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.fetchCorrelator.Delete(correlationID)
 		return models.FetchResult{}, fmt.Errorf("fetch timeout")
 	case <-s.ctx.Done():
@@ -816,7 +847,7 @@ func (s *stream) hfetch(topic string, autoCommit bool, batchSize uint32) (models
 	case result := <-ch:
 		s.hfetchCorrelator.Delete(correlationID)
 		return result, result.Error
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.hfetchCorrelator.Delete(correlationID)
 		return models.FetchResult{}, fmt.Errorf("hfetch timeout")
 	case <-s.ctx.Done():
@@ -855,7 +886,7 @@ func (s *stream) BeginTx() error {
 	case err := <-ch:
 		s.beginTxCorrelator.Delete(correlationID)
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.beginTxCorrelator.Delete(correlationID)
 		return fmt.Errorf("begin tx timeout")
 	case <-s.ctx.Done():
@@ -894,7 +925,7 @@ func (s *stream) CommitTx() error {
 	case err := <-ch:
 		s.commitTxCorrelator.Delete(correlationID)
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.commitTxCorrelator.Delete(correlationID)
 		return fmt.Errorf("commit tx timeout")
 	case <-s.ctx.Done():
@@ -933,7 +964,7 @@ func (s *stream) RollbackTx() error {
 	case err := <-ch:
 		s.rollbackTxCorrelator.Delete(correlationID)
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.rollbackTxCorrelator.Delete(correlationID)
 		return fmt.Errorf("rollback tx timeout")
 	case <-s.ctx.Done():
@@ -1027,7 +1058,7 @@ func (s *stream) Unsubscribe(subscriptionID uint32) error {
 
 		s.logger.Info("unsubscribed from topic", "subscription_id", subscriptionID)
 		return nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.unsubscribeCorrelator.Delete(correlationID)
 		return fmt.Errorf("unsubscribe timeout")
 	case <-s.ctx.Done():
@@ -1076,7 +1107,7 @@ func (s *stream) Ack(subscriptionID uint32, messageIDs ...[]byte) (models.AckRes
 		}
 		s.logger.Debug("ack successful", "subscription_id", subscriptionID, "message_count", len(messageIDs))
 		return result, nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.ackCorrelator.Delete(correlationID)
 		return models.AckResult{}, fmt.Errorf("ack timeout")
 	case <-s.ctx.Done():
@@ -1125,7 +1156,7 @@ func (s *stream) Nack(subscriptionID uint32, messageIDs ...[]byte) (models.NackR
 		}
 		s.logger.Debug("nack successful", "subscription_id", subscriptionID, "message_count", len(messageIDs))
 		return result, nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(s.rpcWait):
 		s.nackCorrelator.Delete(correlationID)
 		return models.NackResult{}, fmt.Errorf("nack timeout")
 	case <-s.ctx.Done():
