@@ -8,11 +8,13 @@ import (
 
 // subscription implements the Subscription interface
 type subscription struct {
-	id      uint32
-	topic   string
-	handler func(msg models.Msg)
-	stream  *stream
-	closed  atomic.Bool
+	id          uint32
+	topic       string
+	handler     func(msg models.Msg)
+	stream      *stream
+	closed      atomic.Bool
+	autoCommit  bool
+	withHeaders bool
 }
 
 // Close closes the subscription

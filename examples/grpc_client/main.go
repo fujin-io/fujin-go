@@ -12,7 +12,9 @@ import (
 	v1 "github.com/fujin-io/fujin-go/grpc/v1"
 	"github.com/fujin-io/fujin-go/models"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
 
 func main() {
@@ -26,7 +28,22 @@ func main() {
 	}))
 
 	// Create connection
-	conn, err := v1.NewConn("localhost:4849", logger, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := v1.NewConn("localhost:4849", logger,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  100 * time.Millisecond,
+				Multiplier: 2,
+				MaxDelay:   3 * time.Second,
+			},
+			MinConnectTimeout: 10 * time.Second,
+		}),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                10 * time.Second,
+			Timeout:             2 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create connection: %v", err)
 	}
@@ -95,7 +112,7 @@ func main() {
 				}
 
 				// Unsubscribe after 10 messages
-				if messageCount == 10 {
+				if messageCount == 1000 {
 					fmt.Printf("Unsubscribing from subscription %d...\n", subscriptionID)
 					if err := stream.Unsubscribe(subscriptionID); err != nil {
 						log.Printf("Failed to unsubscribe: %v", err)

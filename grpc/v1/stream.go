@@ -132,6 +132,7 @@ func (s *stream) start() error {
 	select {
 	case resp := <-s.responseCh:
 		if connectResp, ok := resp.Response.(*pb.FujinResponse_Connect); ok {
+			fmt.Println("connect response", connectResp)
 			if connectResp.Connect.CorrelationId == correlationID {
 				if connectResp.Connect.Error != "" {
 					return fmt.Errorf("connect error: %s", connectResp.Connect.Error)
@@ -159,17 +160,184 @@ func (s *stream) readResponses() {
 		case <-s.ctx.Done():
 			return
 		default:
+			fmt.Println("reading response")
 			resp, err := s.grpcStream.Recv()
 			if err != nil {
-				if s.ctx.Err() == nil {
-					s.logger.Error("failed to receive response", "error", err)
+				fmt.Println("error reading response", err)
+				if s.ctx.Err() != nil || s.closed.Load() {
+					return
 				}
-				return
+				s.logger.Error("receive failed, attempting to reconnect", "error", err)
+				// best-effort close current client stream to release resources
+				_ = s.grpcStream.CloseSend()
+				if err := s.reconnectWithBackoff(); err != nil {
+					s.logger.Error("reconnect failed, stopping stream", "error", err)
+					return
+				}
+				fmt.Println("reconnected successfully")
+				// on successful reconnect continue loop to Recv() on new stream
+				continue
 			}
 
 			s.routeResponse(resp)
+			fmt.Println("routed response")
 		}
 	}
+}
+
+// reconnectWithBackoff attempts to re-establish the grpc stream and resubscribe
+func (s *stream) reconnectWithBackoff() error {
+	s.connected.Store(false)
+
+	// simple exponential backoff: 200ms -> 3.2s (cap 5s), total until ctx done
+	backoff := 200 * time.Millisecond
+	for {
+		if s.ctx.Err() != nil || s.closed.Load() {
+			return s.ctx.Err()
+		}
+
+		if err := s.reconnectOnce(); err != nil {
+			s.logger.Warn("reconnect attempt failed", "error", err)
+			if backoff < 5*time.Second {
+				backoff *= 2
+				if backoff > 5*time.Second {
+					backoff = 5 * time.Second
+				}
+			}
+			select {
+			case <-time.After(backoff):
+				continue
+			case <-s.ctx.Done():
+				return s.ctx.Err()
+			}
+		}
+
+		// success
+		return nil
+	}
+}
+
+// reconnectOnce recreates stream, sends CONNECT, and resubscribes existing subs
+func (s *stream) reconnectOnce() error {
+	// recreate underlying bidi stream
+	grpcStream, err := s.client.Stream(s.ctx)
+	if err != nil {
+		return fmt.Errorf("create grpc stream: %w", err)
+	}
+	fmt.Println("created gRPC stream on reconnect", grpcStream)
+	s.grpcStream = grpcStream
+
+	// send CONNECT again
+	correlationID := s.correlationID.Add(1)
+	connectReq := &pb.FujinRequest{
+		Request: &pb.FujinRequest_Connect{
+			Connect: &pb.ConnectRequest{
+				CorrelationId: correlationID,
+				StreamId:      s.streamID,
+			},
+		},
+	}
+	if err := grpcStream.Send(connectReq); err != nil {
+		return fmt.Errorf("send connect: %w", err)
+	}
+	fmt.Println("sent connect request on reconnect", connectReq)
+
+	resp, err := grpcStream.Recv()
+	if err != nil {
+		return fmt.Errorf("receive connect response: %w", err)
+	}
+	fmt.Println("received connect response on reconnect", resp)
+
+	s.connected.Store(true)
+	s.logger.Info("stream reconnected")
+
+	// resubscribe existing subscriptions
+	return s.resubscribeAll()
+}
+
+// resubscribeAll re-issues subscribe requests for current subs and updates IDs
+func (s *stream) resubscribeAll() error {
+	// snapshot current subscriptions
+	s.subsMu.RLock()
+	subs := make([]*subscription, 0, len(s.subscriptions))
+	for _, sub := range s.subscriptions {
+		subs = append(subs, sub)
+	}
+	s.subsMu.RUnlock()
+
+	fmt.Println("resubscribing", len(subs), "subscriptions")
+
+	for _, sub := range subs {
+		if sub.closed.Load() {
+			continue
+		}
+
+		// send subscribe again based on type
+		ch := make(chan uint32, 1)
+		var corrID uint32
+		var req *pb.FujinRequest
+		if sub.withHeaders {
+			corrID = s.hsubscribeCorrelator.Next(ch)
+			req = &pb.FujinRequest{Request: &pb.FujinRequest_Hsubscribe{Hsubscribe: &pb.HSubscribeRequest{CorrelationId: corrID, Topic: sub.topic, AutoCommit: sub.autoCommit}}}
+		} else {
+			corrID = s.subscribeCorrelator.Next(ch)
+			req = &pb.FujinRequest{Request: &pb.FujinRequest_Subscribe{Subscribe: &pb.SubscribeRequest{CorrelationId: corrID, Topic: sub.topic, AutoCommit: sub.autoCommit}}}
+		}
+
+		if err := s.grpcStream.Send(req); err != nil {
+			if sub.withHeaders {
+				s.hsubscribeCorrelator.Delete(corrID)
+			} else {
+				s.subscribeCorrelator.Delete(corrID)
+			}
+			return fmt.Errorf("resubscribe send: %w", err)
+		}
+
+		resp, err := s.grpcStream.Recv()
+		if err != nil {
+			return fmt.Errorf("receive resubscribe response: %w", err)
+		}
+		fmt.Println("received resubscribe response", resp)
+
+		if subscribeResp, ok := resp.Response.(*pb.FujinResponse_Subscribe); ok {
+			newID := subscribeResp.Subscribe.SubscriptionId
+			if subscribeResp.Subscribe.Error != "" {
+				return fmt.Errorf("resubscribe error: %s", subscribeResp.Subscribe.Error)
+			}
+
+			s.subscribeCorrelator.Delete(corrID)
+			if newID == 0 {
+				return fmt.Errorf("resubscribe failed for topic %s", sub.topic)
+			}
+			s.subsMu.Lock()
+			delete(s.subscriptions, sub.id)
+			sub.id = newID
+			s.subscriptions[newID] = sub
+			s.subsMu.Unlock()
+			s.logger.Info("resubscribed", "topic", sub.topic, "subscription_id", newID)
+		}
+
+		if subscribeResp, ok := resp.Response.(*pb.FujinResponse_Hsubscribe); ok {
+			newID := subscribeResp.Hsubscribe.SubscriptionId
+			if subscribeResp.Hsubscribe.Error != "" {
+				return fmt.Errorf("resubscribe error: %s", subscribeResp.Hsubscribe.Error)
+			}
+
+			s.hsubscribeCorrelator.Delete(corrID)
+			if newID == 0 {
+				return fmt.Errorf("resubscribe failed for topic %s", sub.topic)
+			}
+			s.subsMu.Lock()
+			delete(s.subscriptions, sub.id)
+			sub.id = newID
+			s.subscriptions[newID] = sub
+			s.subsMu.Unlock()
+			s.logger.Info("resubscribed", "topic", sub.topic, "subscription_id", newID)
+		}
+	}
+
+	fmt.Println("resubscribed all subscriptions")
+	return nil
 }
 
 // routeResponse routes incoming responses to appropriate correlators
@@ -470,10 +638,12 @@ func (s *stream) subscribe(topic string, autoCommit bool, handler func(msg model
 		}
 
 		sub := &subscription{
-			id:      subscriptionID,
-			topic:   topic,
-			handler: handler,
-			stream:  s,
+			id:          subscriptionID,
+			topic:       topic,
+			handler:     handler,
+			stream:      s,
+			autoCommit:  autoCommit,
+			withHeaders: false,
 		}
 
 		s.subsMu.Lock()
@@ -535,10 +705,12 @@ func (s *stream) hsubscribe(topic string, autoCommit bool, handler func(msg mode
 		}
 
 		sub := &subscription{
-			id:      subscriptionID,
-			topic:   topic,
-			handler: handler,
-			stream:  s,
+			id:          subscriptionID,
+			topic:       topic,
+			handler:     handler,
+			stream:      s,
+			autoCommit:  autoCommit,
+			withHeaders: true,
 		}
 
 		s.subsMu.Lock()
