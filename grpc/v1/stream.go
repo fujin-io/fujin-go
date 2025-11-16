@@ -9,6 +9,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/fujin-io/fujin-go/config"
 	"github.com/fujin-io/fujin-go/correlator"
 	"github.com/fujin-io/fujin-go/models"
 	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
@@ -38,16 +39,14 @@ func bytesToString(b []byte) string {
 
 // stream implements the Stream interface
 type stream struct {
-	client   pb.FujinServiceClient
-	streamID string
-	logger   *slog.Logger
+	client          pb.FujinServiceClient
+	configOverrides map[string]string
+	logger          *slog.Logger
 
 	grpcStream pb.FujinService_StreamClient
 
 	connected atomic.Bool
 	closed    atomic.Bool
-
-	correlationID atomic.Uint32
 
 	// config
 	rpcWait         time.Duration
@@ -79,27 +78,14 @@ type stream struct {
 	wg sync.WaitGroup
 }
 
-// ReconnectBackoff defines reconnection backoff policy
-type ReconnectBackoff struct {
-	Initial    time.Duration
-	Max        time.Duration
-	Multiplier float64
-}
-
-// StreamConfig configures stream timeouts and reconnection policy
-type StreamConfig struct {
-	RPCWait time.Duration
-	Backoff ReconnectBackoff
-}
-
 // newStream creates a new stream
-func newStream(client pb.FujinServiceClient, streamID string, logger *slog.Logger, cfg *StreamConfig) (*stream, error) {
+func newStream(client pb.FujinServiceClient, configOverrides map[string]string, logger *slog.Logger, cfg *config.StreamConfig) (*stream, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &stream{
 		client:                client,
-		streamID:              streamID,
-		logger:                logger.With("stream_id", streamID),
+		configOverrides:       configOverrides,
+		logger:                logger,
 		subscriptions:         make(map[uint32]*subscription),
 		responseCh:            make(chan *pb.FujinResponse, 1000),
 		responseDone:          make(chan struct{}),
@@ -124,17 +110,19 @@ func newStream(client pb.FujinServiceClient, streamID string, logger *slog.Logge
 
 	// apply config if provided
 	if cfg != nil {
-		if cfg.RPCWait > 0 {
-			s.rpcWait = cfg.RPCWait
-		}
-		if cfg.Backoff.Initial > 0 {
-			s.backoffInitial = cfg.Backoff.Initial
-		}
-		if cfg.Backoff.Max > 0 {
-			s.backoffMax = cfg.Backoff.Max
-		}
-		if cfg.Backoff.Multiplier > 0 {
-			s.backoffMultiple = cfg.Backoff.Multiplier
+		if cfg.GRPC != nil {
+			if cfg.GRPC.RPCWait > 0 {
+				s.rpcWait = cfg.GRPC.RPCWait
+			}
+			if cfg.GRPC.Backoff.Initial > 0 {
+				s.backoffInitial = cfg.GRPC.Backoff.Initial
+			}
+			if cfg.GRPC.Backoff.Max > 0 {
+				s.backoffMax = cfg.GRPC.Backoff.Max
+			}
+			if cfg.GRPC.Backoff.Multiplier > 0 {
+				s.backoffMultiple = cfg.GRPC.Backoff.Multiplier
+			}
 		}
 	}
 
@@ -157,36 +145,32 @@ func (s *stream) start() error {
 	s.wg.Add(1)
 	go s.readResponses()
 
-	// Send CONNECT request
-	correlationID := s.correlationID.Add(1)
-	connectReq := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Connect{
-			Connect: &pb.ConnectRequest{
-				CorrelationId: correlationID,
-				StreamId:      s.streamID,
+	// Send INIT request
+	initReq := &pb.FujinRequest{
+		Request: &pb.FujinRequest_Init{
+			Init: &pb.InitRequest{
+				ConfigOverrides: s.configOverrides,
 			},
 		},
 	}
 
-	if err := grpcStream.Send(connectReq); err != nil {
-		return fmt.Errorf("failed to send connect request: %w", err)
+	if err := grpcStream.Send(initReq); err != nil {
+		return fmt.Errorf("failed to send init request: %w", err)
 	}
 
 	select {
 	case resp := <-s.responseCh:
-		if connectResp, ok := resp.Response.(*pb.FujinResponse_Connect); ok {
-			if connectResp.Connect.CorrelationId == correlationID {
-				if connectResp.Connect.Error != "" {
-					return fmt.Errorf("connect error: %s", connectResp.Connect.Error)
-				}
-				s.connected.Store(true)
-				s.logger.Info("stream connected")
-				return nil
+		if initResp, ok := resp.Response.(*pb.FujinResponse_Init); ok {
+			if initResp.Init.Error != "" {
+				return fmt.Errorf("init error: %s", initResp.Init.Error)
 			}
+			s.connected.Store(true)
+			s.logger.Info("stream initialized")
+			return nil
 		}
-		return fmt.Errorf("unexpected connect response")
+		return fmt.Errorf("unexpected init response")
 	case <-time.After(s.rpcWait):
-		return fmt.Errorf("connect timeout")
+		return fmt.Errorf("init timeout")
 	case <-s.ctx.Done():
 		return s.ctx.Err()
 	}
@@ -255,7 +239,7 @@ func (s *stream) reconnectWithBackoff() error {
 	}
 }
 
-// reconnectOnce recreates stream, sends CONNECT, and resubscribes existing subs
+// reconnectOnce recreates stream, sends INIT, and resubscribes existing subs
 func (s *stream) reconnectOnce() error {
 	// recreate underlying bidi stream
 	grpcStream, err := s.client.Stream(s.ctx)
@@ -264,27 +248,25 @@ func (s *stream) reconnectOnce() error {
 	}
 	s.grpcStream = grpcStream
 
-	// send CONNECT again
-	correlationID := s.correlationID.Add(1)
-	connectReq := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Connect{
-			Connect: &pb.ConnectRequest{
-				CorrelationId: correlationID,
-				StreamId:      s.streamID,
+	// send INIT again
+	initReq := &pb.FujinRequest{
+		Request: &pb.FujinRequest_Init{
+			Init: &pb.InitRequest{
+				ConfigOverrides: s.configOverrides,
 			},
 		},
 	}
-	if err := grpcStream.Send(connectReq); err != nil {
-		return fmt.Errorf("send connect: %w", err)
+	if err := grpcStream.Send(initReq); err != nil {
+		return fmt.Errorf("send init: %w", err)
 	}
 
-	_, err = grpcStream.Recv()
+	initResp, err := grpcStream.Recv()
 	if err != nil {
-		return fmt.Errorf("receive connect response: %w", err)
+		return fmt.Errorf("receive init response: %w", err)
 	}
-
-	s.connected.Store(true)
-	s.logger.Info("stream reconnected")
+	if initResp, ok := initResp.Response.(*pb.FujinResponse_Init); ok && initResp.Init.Error != "" {
+		return fmt.Errorf("init error: %s", initResp.Init.Error)
+	}
 
 	// resubscribe existing subscriptions
 	return s.resubscribeAll()
@@ -374,10 +356,11 @@ func (s *stream) resubscribeAll() error {
 // routeResponse routes incoming responses to appropriate correlators
 func (s *stream) routeResponse(resp *pb.FujinResponse) {
 	switch r := resp.Response.(type) {
-	case *pb.FujinResponse_Connect:
+	case *pb.FujinResponse_Init:
 		select {
 		case s.responseCh <- resp:
 		case <-s.ctx.Done():
+			return
 		}
 	case *pb.FujinResponse_Produce:
 		if r.Produce.Error != "" {

@@ -28,7 +28,7 @@ func main() {
 	}))
 
 	// Create connection
-	conn, err := v1.NewConn("localhost:4849", logger,
+	conn, err := v1.Dial("localhost:4849", logger,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoff.Config{
@@ -50,7 +50,7 @@ func main() {
 	defer conn.Close()
 
 	// Create stream
-	stream, err := conn.Connect("")
+	stream, err := conn.Init(nil)
 	if err != nil {
 		log.Fatalf("Failed to create stream: %v", err)
 	}

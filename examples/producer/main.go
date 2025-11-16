@@ -40,7 +40,10 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Connect("")
+	s, err := conn.Init(map[string]string{
+		"writer.pub.key":   "value",
+		"writer.pub.topic": "another_topic",
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

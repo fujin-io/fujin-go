@@ -39,7 +39,7 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Connect("")
+	s, err := conn.Init(nil)
 	if err != nil {
 		log.Fatal(err)
 	}

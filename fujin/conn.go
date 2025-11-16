@@ -34,6 +34,7 @@ func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.
 		tlsConf = tlsConf.Clone()
 		tlsConf.NextProtos = []string{v1.Version}
 	}
+
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("quic: dial addr: %w", err)

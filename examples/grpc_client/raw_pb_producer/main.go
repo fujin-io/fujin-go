@@ -44,11 +44,11 @@ func main() {
 			}
 
 			switch r := resp.Response.(type) {
-			case *pb.FujinResponse_Connect:
-				if r.Connect.Error != "" {
-					log.Printf("Connect error: %s", r.Connect.Error)
+			case *pb.FujinResponse_Init:
+				if r.Init.Error != "" {
+					log.Printf("Init error: %s", r.Init.Error)
 				} else {
-					fmt.Println("✓ Connected to Fujin gRPC server")
+					fmt.Println("✓ Initialized Fujin gRPC server")
 				}
 			case *pb.FujinResponse_Produce:
 				if r.Produce.Error != "" {
@@ -64,10 +64,9 @@ func main() {
 
 	// Send CONNECT request
 	if err := stream.Send(&pb.FujinRequest{
-		Request: &pb.FujinRequest_Connect{
-			Connect: &pb.ConnectRequest{
-				CorrelationId: 1,
-				StreamId:      "producer-1",
+		Request: &pb.FujinRequest_Init{
+			Init: &pb.InitRequest{
+				ConfigOverrides: nil,
 			},
 		},
 	}); err != nil {

@@ -28,11 +28,3 @@ func boolToByte(b bool) byte {
 	}
 	return 0
 }
-
-func byteToBool(b byte) bool {
-	if b <= 0 {
-		return false
-	}
-
-	return true
-}

@@ -38,7 +38,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -60,7 +60,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -86,7 +86,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -112,7 +112,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -138,7 +138,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect writer: %v", err)
 		}
@@ -167,7 +167,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -195,7 +195,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		writer, err := conn.Connect("id")
+		writer, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -227,7 +227,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -258,7 +258,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -288,7 +288,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}
@@ -315,7 +315,7 @@ func TestStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := conn.Connect("id")
+		stream, err := conn.Init(nil)
 		if err != nil {
 			t.Fatalf("failed to connect: %v", err)
 		}

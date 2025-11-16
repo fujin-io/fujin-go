@@ -1,4 +1,4 @@
-package v1
+package fujin_go
 
 import (
 	"github.com/fujin-io/fujin-go/config"

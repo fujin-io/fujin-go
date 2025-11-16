@@ -3,7 +3,7 @@ module github.com/fujin-io/fujin-go
 go 1.24.2
 
 require (
-	github.com/fujin-io/fujin v0.1.3
+	github.com/fujin-io/fujin v0.1.6
 	github.com/nats-io/nats-server/v2 v2.12.1
 	github.com/panjf2000/ants/v2 v2.11.3
 	github.com/quic-go/quic-go v0.55.0

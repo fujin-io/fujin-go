@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/fujin-io/fujin-go/config"
 	"github.com/fujin-io/fujin-go/correlator"
 	"github.com/fujin-io/fujin-go/fujin/pool"
 	v1 "github.com/fujin-io/fujin/public/proto/fujin/v1"
@@ -44,33 +45,75 @@ type Stream struct {
 	l *slog.Logger
 }
 
-func (c *Conn) Connect(id string) (*Stream, error) {
-	if c == nil {
-		return nil, ErrConnClosed
-	}
+func (c *Conn) Init(configOverrides map[string]string) (*Stream, error) {
+	return c.InitWith(configOverrides, nil)
+}
 
-	if c.closed.Load() {
-		return nil, ErrConnClosed
-	}
-
+func (c *Conn) InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (*Stream, error) {
 	stream, err := c.qconn.OpenStream()
 	if err != nil {
 		return nil, fmt.Errorf("open stream: %w", err)
 	}
 
-	buf := pool.Get(5)
+	buflen := 1 + Uint16Len
+	for k, v := range configOverrides {
+		buflen += Uint32Len + len(k) + Uint32Len + len(v)
+	}
+
+	buf := pool.Get(buflen)
 	defer pool.Put(buf)
 
-	buf = append(buf, byte(v1.OP_CODE_CONNECT))
-	buf = binary.BigEndian.AppendUint32(buf, uint32(len(id)))
-	buf = append(buf, id...)
+	buf = append(buf, byte(v1.OP_CODE_INIT))
+	buf = AppendFujinUint16StringArray(buf, configOverrides)
 
 	if _, err := stream.Write(buf); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("write connect: %w", err)
+		return nil, fmt.Errorf("write init: %w", err)
 	}
 
-	l := c.l.With("stream_id", id, "quic_stream_id", stream.StreamID())
+	initRespBuf := pool.Get(1 + 1 + Uint32Len + 512) // max reasonable error size
+
+	if _, err := io.ReadFull(stream, initRespBuf[:1]); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("read init response code: %w", err)
+	}
+
+	const RESP_CODE_INIT = byte(v1.RESP_CODE_INIT)
+	if initRespBuf[0] != RESP_CODE_INIT {
+		stream.Close()
+		return nil, fmt.Errorf("unexpected init response code: %d, expected %d", initRespBuf[0], RESP_CODE_INIT)
+	}
+
+	if _, err := io.ReadFull(stream, initRespBuf[1:2]); err != nil {
+		stream.Close()
+		return nil, fmt.Errorf("read init error nullability: %w", err)
+	}
+
+	if initRespBuf[1] != 0 {
+		if _, err := io.ReadFull(stream, initRespBuf[2:6]); err != nil {
+			stream.Close()
+			return nil, fmt.Errorf("read init error length: %w", err)
+		}
+
+		errorLen := binary.BigEndian.Uint32(initRespBuf[2:6])
+		if errorLen == 0 {
+			stream.Close()
+			return nil, fmt.Errorf("invalid init error length: 0")
+		}
+
+		errorBuf := pool.Get(int(errorLen))
+		defer pool.Put(errorBuf)
+
+		if _, err := io.ReadFull(stream, errorBuf[:errorLen]); err != nil {
+			stream.Close()
+			return nil, fmt.Errorf("read init error message: %w", err)
+		}
+
+		stream.Close()
+		return nil, fmt.Errorf("init error: %s", string(errorBuf[:errorLen]))
+	}
+
+	l := c.l.With("quic_stream_id", stream.StreamID())
 	out := NewOutbound(stream, c.wdl, l)
 
 	s := &Stream{
