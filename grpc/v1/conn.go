@@ -57,7 +57,7 @@ func (c *conn) InitWith(configOverrides map[string]string, cfg *config.StreamCon
 	}
 	c.mu.RUnlock()
 
-	stream, err := newStream(c.client, nil, c.logger, cfg)
+	stream, err := newStream(c.client, configOverrides, c.logger, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create stream: %w", err)
 	}

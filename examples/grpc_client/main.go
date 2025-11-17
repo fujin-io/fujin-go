@@ -39,9 +39,9 @@ func main() {
 			MinConnectTimeout: 10 * time.Second,
 		}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second,
+			Time:                5 * time.Minute,
 			Timeout:             2 * time.Second,
-			PermitWithoutStream: true,
+			PermitWithoutStream: false,
 		}),
 	)
 	if err != nil {
