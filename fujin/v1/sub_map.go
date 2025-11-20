@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 import (
 	"sync"
@@ -6,23 +6,23 @@ import (
 
 type subscriptions struct {
 	mu sync.RWMutex
-	m  map[byte]*Subscription
+	m  map[byte]*subscription
 }
 
 func newSubscriptions() *subscriptions {
 	return &subscriptions{
-		m: make(map[byte]*Subscription),
+		m: make(map[byte]*subscription),
 	}
 }
 
-func (sm *subscriptions) add(s *Subscription) {
+func (sm *subscriptions) add(s *subscription) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	sm.m[s.id] = s
 }
 
-func (sm *subscriptions) get(id byte) (*Subscription, bool) {
+func (sm *subscriptions) get(id byte) (*subscription, bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -38,9 +38,6 @@ func (sm *subscriptions) delete(id byte) {
 }
 
 func (sm *subscriptions) close() {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	for _, sub := range sm.m {
 		sub.Close()
 	}

@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 import "time"
 
@@ -21,3 +21,4 @@ func (c *ReaderConfig) Validate() error {
 
 	return nil
 }
+

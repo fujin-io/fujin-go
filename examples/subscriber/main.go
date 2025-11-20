@@ -10,7 +10,8 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/fujin-io/fujin-go/fujin"
+	v1 "github.com/fujin-io/fujin-go/fujin/v1"
+	"github.com/fujin-io/fujin-go/models"
 )
 
 type TestMsg struct {
@@ -22,14 +23,12 @@ func main() {
 	defer cancel()
 	defer fmt.Println("disconnected")
 
-	conn, err := fujin.Dial(ctx, "localhost:4848", &tls.Config{InsecureSkipVerify: true}, nil,
-		fujin.WithTimeout(100*time.Second),
-		fujin.WithLogger(
-			slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-				AddSource: true,
-				Level:     slog.LevelDebug,
-			})),
-		),
+	conn, err := v1.Dial(ctx, "localhost:4848", &tls.Config{InsecureSkipVerify: true}, nil,
+		slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			AddSource: true,
+			Level:     slog.LevelDebug,
+		})),
+		v1.WithTimeout(100*time.Second),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -49,23 +48,23 @@ func main() {
 	defer fmt.Println("stream closed")
 	defer s.Close()
 
-	sub, err := s.HSubscribe("sub", true, func(msg fujin.Msg) {
-		fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
+	sub, err := s.HSubscribe("sub", true, func(msg models.Msg) {
+		fmt.Println("Value:", string(msg.Payload), "Headers:", msg.Headers)
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer fmt.Println("subscription closed")
-	defer sub.Close()
+	defer s.Unsubscribe(sub)
 
-	sub2, err := s.HSubscribe("sub", true, func(msg fujin.Msg) {
-		fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
+	sub2, err := s.HSubscribe("sub", true, func(msg models.Msg) {
+		fmt.Println("Value:", string(msg.Payload), "Headers:", msg.Headers)
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer fmt.Println("subscription 2 closed")
-	defer sub2.Close()
+	defer s.Unsubscribe(sub2)
 
 	fmt.Println("subscribed")
 

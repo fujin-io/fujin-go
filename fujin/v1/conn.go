@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 import (
 	"context"
@@ -9,17 +9,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	v1 "github.com/fujin-io/fujin/public/proto/fujin/v1"
+	"github.com/fujin-io/fujin-go/config"
+	v1 "github.com/fujin-io/fujin-go/interfaces/v1"
+	v1proto "github.com/fujin-io/fujin/public/proto/fujin/v1"
 	"github.com/quic-go/quic-go"
 )
 
 var (
 	ReadBufferSize = 512
 
-	DISCONNECT_REQ = []byte{byte(v1.OP_CODE_DISCONNECT)}
+	DISCONNECT_REQ = []byte{byte(v1proto.OP_CODE_DISCONNECT)}
 )
 
-type Conn struct {
+type conn struct {
 	qconn *quic.Conn
 
 	timeout time.Duration
@@ -29,22 +31,29 @@ type Conn struct {
 	l *slog.Logger
 }
 
-func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config, opts ...Option) (*Conn, error) {
+var _ v1.Conn = (*conn)(nil)
+
+// Dial creates a new connection to Fujin server using the native QUIC protocol
+func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config, logger *slog.Logger, opts ...Option) (v1.Conn, error) {
 	if tlsConf != nil {
 		tlsConf = tlsConf.Clone()
-		tlsConf.NextProtos = []string{v1.Version}
+		tlsConf.NextProtos = []string{v1proto.Version}
 	}
 
-	conn, err := quic.DialAddr(ctx, addr, tlsConf, quicConf)
+	quicConn, err := quic.DialAddr(ctx, addr, tlsConf, quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("quic: dial addr: %w", err)
 	}
 
-	c := &Conn{
-		qconn:   conn,
+	c := &conn{
+		qconn:   quicConn,
 		timeout: 10 * time.Second,
 		wdl:     5 * time.Second,
-		l:       slog.Default(),
+		l:       logger,
+	}
+
+	if c.l == nil {
+		c.l = slog.Default()
 	}
 
 	for _, opt := range opts {
@@ -62,7 +71,7 @@ func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.
 				if c.closed.Load() {
 					return
 				}
-				str, err := conn.AcceptStream(ctx)
+				str, err := quicConn.AcceptStream(ctx)
 				if err != nil {
 					c.l.Error("ping: accept stream", "err", err)
 					continue
@@ -79,7 +88,15 @@ func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.
 	return c, nil
 }
 
-func (c *Conn) Close() error {
+func (c *conn) Init(configOverrides map[string]string) (v1.Stream, error) {
+	return c.InitWith(configOverrides, nil)
+}
+
+func (c *conn) InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (v1.Stream, error) {
+	return newStream(c, configOverrides, cfg)
+}
+
+func (c *conn) Close() error {
 	// disconnect and close all streams
 	c.closed.Store(true)
 	if err := c.qconn.CloseWithError(0x0, ""); err != nil {
@@ -93,7 +110,7 @@ func handlePing(str *quic.Stream, buf []byte) error {
 
 	_, err := str.Read(buf[:])
 	if err == io.EOF {
-		buf[0] = byte(v1.RESP_CODE_PONG)
+		buf[0] = byte(v1proto.RESP_CODE_PONG)
 		if _, err := str.Write(buf[:]); err != nil {
 			return fmt.Errorf("ping: write pong: %w", err)
 		}

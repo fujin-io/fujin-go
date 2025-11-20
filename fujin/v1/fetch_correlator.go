@@ -1,10 +1,10 @@
-package fujin
+package v1
 
 import "sync"
 
 type fetchCorrelator struct {
 	n  uint32
-	m  map[uint32][]Msg
+	m  map[uint32][]fujinMsg
 	e  map[uint32]chan error
 	ac map[uint32]bool
 
@@ -13,7 +13,7 @@ type fetchCorrelator struct {
 
 func newFetchCorrelator() *fetchCorrelator {
 	return &fetchCorrelator{
-		m:  make(map[uint32][]Msg),
+		m:  make(map[uint32][]fujinMsg),
 		e:  make(map[uint32]chan error),
 		ac: map[uint32]bool{},
 	}
@@ -29,20 +29,20 @@ func (c *fetchCorrelator) next(eCh chan error, autoCommit bool) uint32 {
 	return c.n
 }
 
-func (c *fetchCorrelator) get(id uint32) (msgs []Msg, autoCommit bool, eCh chan error) {
+func (c *fetchCorrelator) get(id uint32) (msgs []fujinMsg, autoCommit bool, eCh chan error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	return c.m[id], c.ac[id], c.e[id]
 }
 
-func (c *fetchCorrelator) setMsgs(id uint32, msgs []Msg) {
+func (c *fetchCorrelator) setMsgs(id uint32, msgs []fujinMsg) {
 	c.mu.Lock()
 	c.m[id] = msgs
 	c.mu.Unlock()
 }
 
-func (c *fetchCorrelator) getMsgs(id uint32) []Msg {
+func (c *fetchCorrelator) getMsgs(id uint32) []fujinMsg {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -57,3 +57,4 @@ func (c *fetchCorrelator) delete(id uint32) {
 	delete(c.e, id)
 	delete(c.ac, id)
 }
+

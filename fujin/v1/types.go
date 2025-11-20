@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 import "encoding/binary"
 
@@ -17,3 +17,4 @@ func AppendFujinUint16StringArray(buf []byte, m map[string]string) []byte {
 	}
 	return buf
 }
+

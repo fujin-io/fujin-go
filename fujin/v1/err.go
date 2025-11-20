@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 import "errors"
 
@@ -12,3 +12,4 @@ var (
 
 	ErrInvalidAckMsgResponseNum = errors.New("invalid number of ack msg responses")
 )
+

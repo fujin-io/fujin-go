@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/fujin-io/fujin-go/fujin"
+	v1 "github.com/fujin-io/fujin-go/fujin/v1"
 )
 
 type TestMsg struct {
@@ -22,14 +22,12 @@ func main() {
 	defer cancel()
 	defer fmt.Println("disconnected")
 
-	conn, err := fujin.Dial(ctx, "localhost:4848", &tls.Config{InsecureSkipVerify: true}, nil,
-		fujin.WithTimeout(100*time.Second),
-		fujin.WithLogger(
-			slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-				AddSource: true,
-				Level:     slog.LevelDebug,
-			})),
-		),
+	conn, err := v1.Dial(ctx, "localhost:4848", &tls.Config{InsecureSkipVerify: true}, nil,
+		slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			AddSource: true,
+			Level:     slog.LevelDebug,
+		})),
+		v1.WithTimeout(100*time.Second),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -53,12 +51,15 @@ func main() {
 		case <-ctx.Done():
 			return
 		default:
-			msgs, err := s.HFetch(ctx, "sub", 1, true)
+			resp, err := s.HFetch("sub", true, 1)
 			if err != nil {
 				log.Fatal(err)
 			}
-			for _, msg := range msgs {
-				fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
+			if resp.Error != nil {
+				log.Fatal(resp.Error)
+			}
+			for _, msg := range resp.Messages {
+				fmt.Println("Payload:", string(msg.Payload), "Headers:", msg.Headers)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

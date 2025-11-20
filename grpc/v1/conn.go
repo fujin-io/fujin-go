@@ -6,9 +6,13 @@ import (
 	"sync"
 
 	"github.com/fujin-io/fujin-go/config"
+	v1 "github.com/fujin-io/fujin-go/interfaces/v1"
 	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
 	"google.golang.org/grpc"
 )
+
+// Ensure conn implements interfaces/v1.Conn
+var _ v1.Conn = (*conn)(nil)
 
 // conn implements the Conn interface
 type conn struct {
@@ -21,7 +25,7 @@ type conn struct {
 }
 
 // Dial creates a new gRPC connection
-func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (Conn, error) {
+func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (v1.Conn, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -44,12 +48,12 @@ func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (Conn, erro
 }
 
 // Init creates a new stream with the given ID
-func (c *conn) Init(configOverrides map[string]string) (Stream, error) {
+func (c *conn) Init(configOverrides map[string]string) (v1.Stream, error) {
 	return c.InitWith(configOverrides, nil)
 }
 
-// ConnectWith creates a new stream with the given ID and config
-func (c *conn) InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (Stream, error) {
+// InitWith creates a new stream with the given ID and config
+func (c *conn) InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (v1.Stream, error) {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()

@@ -7,12 +7,13 @@ import (
 	"sync"
 	"time"
 
+	v1 "github.com/fujin-io/fujin-go/interfaces/v1"
 	"github.com/fujin-io/fujin-go/models"
 )
 
 // Subscriber provides high-performance message consumption
 type Subscriber struct {
-	stream Stream
+	stream v1.Stream
 	logger *slog.Logger
 
 	maxConcurrent int
@@ -44,7 +45,7 @@ func DefaultConsumerConfig() *ConsumerConfig {
 }
 
 // NewSubscriber creates a new high-performance consumer
-func NewSubscriber(stream Stream, config *ConsumerConfig, logger *slog.Logger) *Subscriber {
+func NewSubscriber(stream v1.Stream, config *ConsumerConfig, logger *slog.Logger) *Subscriber {
 	if config == nil {
 		config = DefaultConsumerConfig()
 	}

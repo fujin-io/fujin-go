@@ -3,8 +3,12 @@ package v1
 import (
 	"sync/atomic"
 
+	"github.com/fujin-io/fujin-go/interfaces/v1"
 	"github.com/fujin-io/fujin-go/models"
 )
+
+// Ensure subscription implements interfaces/v1.Subscription
+var _ v1.Subscription = (*subscription)(nil)
 
 // subscription implements the Subscription interface
 type subscription struct {

@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 const (
 	OP_START int = iota
@@ -117,7 +117,7 @@ type correlationIDArg struct {
 }
 
 type msgArg struct {
-	sub   *Subscription
+	sub   *subscription
 	idLen uint32
 	len   uint32
 
@@ -135,7 +135,7 @@ type fetchArg struct {
 	subID      byte
 	n          uint32
 	handled    uint32
-	msgs       []Msg
+	msgs       []fujinMsg
 	err        chan error
 
 	headers     map[string]string
@@ -155,3 +155,4 @@ type ackArg struct {
 type errArg struct {
 	errLen uint32
 }
+

@@ -11,9 +11,13 @@ import (
 
 	"github.com/fujin-io/fujin-go/config"
 	"github.com/fujin-io/fujin-go/correlator"
+	v1 "github.com/fujin-io/fujin-go/interfaces/v1"
 	"github.com/fujin-io/fujin-go/models"
 	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
 )
+
+// Ensure stream implements interfaces/v1.Stream
+var _ v1.Stream = (*stream)(nil)
 
 const (
 	defaultRPCWait = 10 * time.Second

@@ -1,4 +1,4 @@
-package fujin
+package v1
 
 type AckResponse struct {
 	Err             error
@@ -14,3 +14,4 @@ type SubscribeResponse struct {
 	SubID byte
 	Err   error
 }
+

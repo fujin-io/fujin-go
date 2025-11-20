@@ -1,10 +1,10 @@
-package fujin
+package v1
 
 import (
 	"encoding/binary"
 )
 
-func (s *Stream) parseErrLenArg() error {
+func (s *stream) parseErrLenArg() error {
 	s.ps.ea.errLen = binary.BigEndian.Uint32(s.ps.argBuf[0:Uint32Len])
 	if s.ps.ea.errLen == 0 {
 		return ErrParseProto
@@ -13,7 +13,7 @@ func (s *Stream) parseErrLenArg() error {
 	return nil
 }
 
-func (s *Stream) parseMsgLenArg() error {
+func (s *stream) parseMsgLenArg() error {
 	s.ps.ma.len = binary.BigEndian.Uint32(s.ps.argBuf[0:Uint32Len])
 	if s.ps.ma.len == 0 {
 		return ErrParseProto
@@ -28,3 +28,4 @@ func boolToByte(b bool) byte {
 	}
 	return 0
 }
+

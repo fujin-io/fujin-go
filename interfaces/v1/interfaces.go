@@ -5,12 +5,14 @@ import (
 	"github.com/fujin-io/fujin-go/models"
 )
 
+// Conn represents a connection to Fujin server
 type Conn interface {
 	Init(configOverrides map[string]string) (Stream, error)
 	InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (Stream, error)
 	Close() error
 }
 
+// Stream represents a stream for producing and consuming messages
 type Stream interface {
 	Produce(topic string, p []byte) error
 	HProduce(topic string, p []byte, headers map[string]string) error
@@ -27,6 +29,7 @@ type Stream interface {
 	Close() error
 }
 
+// Subscription represents a subscription to a topic
 type Subscription interface {
 	Close() error
 }

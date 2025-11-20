@@ -11,7 +11,7 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/fujin-io/fujin-go/fujin"
+	v1 "github.com/fujin-io/fujin-go/fujin/v1"
 )
 
 type TestMsg struct {
@@ -23,14 +23,12 @@ func main() {
 	defer cancel()
 	defer fmt.Println("disconnected")
 
-	conn, err := fujin.Dial(ctx, "localhost:4848", &tls.Config{InsecureSkipVerify: true}, nil,
-		fujin.WithTimeout(100*time.Second),
-		fujin.WithLogger(
-			slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-				AddSource: true,
-				Level:     slog.LevelDebug,
-			})),
-		),
+	conn, err := v1.Dial(ctx, "localhost:4848", &tls.Config{InsecureSkipVerify: true}, nil,
+		slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			AddSource: true,
+			Level:     slog.LevelDebug,
+		})),
+		v1.WithTimeout(100*time.Second),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -40,10 +38,7 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Init(map[string]string{
-		"writer.pub.key":   "value",
-		"writer.pub.topic": "another_topic",
-	})
+	s, err := conn.Init(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
