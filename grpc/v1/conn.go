@@ -5,8 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/fujin-io/fujin-go/config"
-	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
+	fujin_go "github.com/fujin-io/fujin-go"
 	"google.golang.org/grpc"
 )
 
@@ -14,14 +13,14 @@ import (
 type conn struct {
 	addr     string
 	grpcConn *grpc.ClientConn
-	client   pb.FujinServiceClient
+	client   FujinServiceClient
 	logger   *slog.Logger
 	mu       sync.RWMutex
 	closed   bool
 }
 
 // Dial creates a new gRPC connection
-func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (Conn, error) {
+func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (fujin_go.Conn, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -37,19 +36,14 @@ func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (Conn, erro
 	}
 
 	c.grpcConn = grpcConn
-	c.client = pb.NewFujinServiceClient(grpcConn)
+	c.client = NewFujinServiceClient(grpcConn)
 
 	c.logger.Info("connected to server", "address", addr)
 	return c, nil
 }
 
-// Init creates a new stream with the given ID
-func (c *conn) Init(configOverrides map[string]string) (Stream, error) {
-	return c.InitWith(configOverrides, nil)
-}
-
-// ConnectWith creates a new stream with the given ID and config
-func (c *conn) InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (Stream, error) {
+// Bind creates a new stream with the given ID
+func (c *conn) Bind(connector string, opts ...fujin_go.BindOption) (fujin_go.Stream, error) {
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -57,7 +51,14 @@ func (c *conn) InitWith(configOverrides map[string]string, cfg *config.StreamCon
 	}
 	c.mu.RUnlock()
 
-	stream, err := newStream(c.client, configOverrides, c.logger, cfg)
+	conf := &fujin_go.BindConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(conf)
+		}
+	}
+
+	stream, err := newStream(c.client, connector, conf.Meta, conf.ConfigOverrides, c.logger, conf.Stream)
 	if err != nil {
 		return nil, fmt.Errorf("create stream: %w", err)
 	}

@@ -39,7 +39,7 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Init(nil)
+	s, err := conn.Bind("kafka_connector", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func main() {
 	defer fmt.Println("stream closed")
 	defer s.Close()
 
-	sub, err := s.HSubscribe("sub", true, func(msg fujin.Msg) {
+	sub, err := s.HSubscribe("client2", true, func(msg fujin.Msg) {
 		fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
 	})
 	if err != nil {
@@ -58,7 +58,7 @@ func main() {
 	defer fmt.Println("subscription closed")
 	defer sub.Close()
 
-	sub2, err := s.HSubscribe("sub", true, func(msg fujin.Msg) {
+	sub2, err := s.HSubscribe("client2", true, func(msg fujin.Msg) {
 		fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
 	})
 	if err != nil {

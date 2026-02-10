@@ -17,3 +17,9 @@ func AppendFujinUint16StringArray(buf []byte, m map[string]string) []byte {
 	}
 	return buf
 }
+
+func AppendFujinString(buf []byte, v string) []byte {
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(v)))
+	buf = append(buf, v...)
+	return buf
+}

@@ -35,8 +35,8 @@ func main() {
 
 	// Send CONNECT request
 	if err := stream.Send(&pb.FujinRequest{
-		Request: &pb.FujinRequest_Init{
-			Init: &pb.InitRequest{
+		Request: &pb.FujinRequest_Bind{
+			Bind: &pb.BindRequest{
 				ConfigOverrides: nil,
 			},
 		},
@@ -74,9 +74,9 @@ func main() {
 		}
 
 		switch r := resp.Response.(type) {
-		case *pb.FujinResponse_Init:
-			if r.Init.Error != "" {
-				log.Printf("Init error: %s", r.Init.Error)
+		case *pb.FujinResponse_Bind:
+			if r.Bind.Error != "" {
+				log.Printf("Bind error: %s", r.Bind.Error)
 			} else {
 				fmt.Println("✓ Initialized Fujin gRPC server")
 			}

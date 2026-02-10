@@ -1,13 +1,11 @@
-package v1
+package fujin_go
 
 import (
-	"github.com/fujin-io/fujin-go/config"
 	"github.com/fujin-io/fujin-go/models"
 )
 
 type Conn interface {
-	Init(configOverrides map[string]string) (Stream, error)
-	InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (Stream, error)
+	Bind(connector string, opts ...BindOption) (Stream, error)
 	Close() error
 }
 

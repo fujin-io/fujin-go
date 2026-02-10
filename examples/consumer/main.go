@@ -39,7 +39,7 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Init(nil)
+	s, err := conn.Bind("kafka_connector")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		default:
-			msgs, err := s.HFetch(ctx, "sub", 1, true)
+			msgs, err := s.Fetch(ctx, "client2", 1, true)
 			if err != nil {
 				log.Fatal(err)
 			}

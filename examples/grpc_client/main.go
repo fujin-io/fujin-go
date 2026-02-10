@@ -50,14 +50,14 @@ func main() {
 	defer conn.Close()
 
 	// Create stream
-	stream, err := conn.Init(nil)
+	stream, err := conn.Bind("kafka_connector", nil, nil)
 	if err != nil {
 		log.Fatalf("Failed to create stream: %v", err)
 	}
 	defer stream.Close()
 
 	// Subscribe to topic with headers support using HSubscribe
-	subscriptionID, err := stream.HSubscribe("sub", true, func(msg models.Msg) {
+	subscriptionID, err := stream.HSubscribe("client2", true, func(msg models.Msg) {
 		fmt.Printf("📨 Received message:\n")
 		fmt.Printf("   Subscription ID: %d\n", msg.SubscriptionID)
 		fmt.Printf("   Message ID: %x\n", msg.MessageID)
@@ -73,7 +73,7 @@ func main() {
 		log.Fatalf("Failed to hsubscribe: %v", err)
 	}
 
-	fmt.Printf("✓ HSubscribed to topic 'sub' with ID %d, waiting for messages with headers...\n", subscriptionID)
+	fmt.Printf("✓ HSubscribed to topic 'client1' with ID %d, waiting for messages with headers...\n", subscriptionID)
 	fmt.Println("Press Ctrl+C to exit")
 
 	// Send some test messages
@@ -91,7 +91,7 @@ func main() {
 
 				// Alternate between regular Produce and HProduce with headers
 				if messageCount%2 == 0 {
-					if err := stream.Produce("pub", []byte(message)); err != nil {
+					if err := stream.Produce("client1", []byte(message)); err != nil {
 						log.Printf("Failed to send message: %v", err)
 					} else {
 						messageCount++
@@ -103,7 +103,7 @@ func main() {
 						"timestamp":    time.Now().Format(time.RFC3339),
 						"source":       "grpc-example",
 					}
-					if err := stream.HProduce("pub", []byte(message), headers); err != nil {
+					if err := stream.HProduce("client1", []byte(message), headers); err != nil {
 						log.Printf("Failed to send message with headers: %v", err)
 					} else {
 						messageCount++

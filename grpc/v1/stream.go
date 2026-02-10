@@ -12,7 +12,6 @@ import (
 	"github.com/fujin-io/fujin-go/config"
 	"github.com/fujin-io/fujin-go/correlator"
 	"github.com/fujin-io/fujin-go/models"
-	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
 )
 
 const (
@@ -39,11 +38,13 @@ func bytesToString(b []byte) string {
 
 // stream implements the Stream interface
 type stream struct {
-	client          pb.FujinServiceClient
+	client          FujinServiceClient
+	connectorName   string
+	meta            map[string]string
 	configOverrides map[string]string
 	logger          *slog.Logger
 
-	grpcStream pb.FujinService_StreamClient
+	grpcStream FujinService_StreamClient
 
 	connected atomic.Bool
 	closed    atomic.Bool
@@ -69,7 +70,7 @@ type stream struct {
 	subscriptions map[uint32]*subscription
 	subsMu        sync.RWMutex
 
-	responseCh   chan *pb.FujinResponse
+	responseCh   chan *FujinResponse
 	responseDone chan struct{}
 
 	ctx    context.Context
@@ -79,15 +80,20 @@ type stream struct {
 }
 
 // newStream creates a new stream
-func newStream(client pb.FujinServiceClient, configOverrides map[string]string, logger *slog.Logger, cfg *config.StreamConfig) (*stream, error) {
+func newStream(
+	client FujinServiceClient,
+	connectorName string, meta map[string]string, configOverrides map[string]string,
+	logger *slog.Logger, cfg *config.StreamConfig,
+) (*stream, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &stream{
 		client:                client,
+		connectorName:         connectorName,
 		configOverrides:       configOverrides,
 		logger:                logger,
 		subscriptions:         make(map[uint32]*subscription),
-		responseCh:            make(chan *pb.FujinResponse, 1000),
+		responseCh:            make(chan *FujinResponse, 1000),
 		responseDone:          make(chan struct{}),
 		ctx:                   ctx,
 		cancel:                cancel,
@@ -134,7 +140,7 @@ func newStream(client pb.FujinServiceClient, configOverrides map[string]string, 
 	return s, nil
 }
 
-// start initializes the gRPC stream and starts response handling
+// start bindializes the gRPC stream and starts response handling
 func (s *stream) start() error {
 	grpcStream, err := s.client.Stream(s.ctx)
 	if err != nil {
@@ -146,31 +152,33 @@ func (s *stream) start() error {
 	go s.readResponses()
 
 	// Send INIT request
-	initReq := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Init{
-			Init: &pb.InitRequest{
+	bindReq := &FujinRequest{
+		Request: &FujinRequest_Bind{
+			Bind: &BindRequest{
+				Connector:       s.connectorName,
+				Meta:            s.meta,
 				ConfigOverrides: s.configOverrides,
 			},
 		},
 	}
 
-	if err := grpcStream.Send(initReq); err != nil {
-		return fmt.Errorf("failed to send init request: %w", err)
+	if err := grpcStream.Send(bindReq); err != nil {
+		return fmt.Errorf("failed to send bind request: %w", err)
 	}
 
 	select {
 	case resp := <-s.responseCh:
-		if initResp, ok := resp.Response.(*pb.FujinResponse_Init); ok {
-			if initResp.Init.Error != "" {
-				return fmt.Errorf("init error: %s", initResp.Init.Error)
+		if bindResp, ok := resp.Response.(*FujinResponse_Bind); ok {
+			if bindResp.Bind.Error != "" {
+				return fmt.Errorf("bind error: %s", bindResp.Bind.Error)
 			}
 			s.connected.Store(true)
-			s.logger.Info("stream initialized")
+			s.logger.Info("stream bindialized")
 			return nil
 		}
-		return fmt.Errorf("unexpected init response")
+		return fmt.Errorf("unexpected bind response")
 	case <-time.After(s.rpcWait):
-		return fmt.Errorf("init timeout")
+		return fmt.Errorf("bind timeout")
 	case <-s.ctx.Done():
 		return s.ctx.Err()
 	}
@@ -221,10 +229,7 @@ func (s *stream) reconnectWithBackoff() error {
 		if err := s.reconnectOnce(); err != nil {
 			s.logger.Warn("reconnect attempt failed", "error", err)
 			if backoff < s.backoffMax {
-				backoff = time.Duration(float64(backoff) * s.backoffMultiple)
-				if backoff > s.backoffMax {
-					backoff = s.backoffMax
-				}
+				backoff = min(time.Duration(float64(backoff)*s.backoffMultiple), s.backoffMax)
 			}
 			select {
 			case <-time.After(backoff):
@@ -249,23 +254,25 @@ func (s *stream) reconnectOnce() error {
 	s.grpcStream = grpcStream
 
 	// send INIT again
-	initReq := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Init{
-			Init: &pb.InitRequest{
+	bindReq := &FujinRequest{
+		Request: &FujinRequest_Bind{
+			Bind: &BindRequest{
+				Connector:       s.connectorName,
+				Meta:            s.meta,
 				ConfigOverrides: s.configOverrides,
 			},
 		},
 	}
-	if err := grpcStream.Send(initReq); err != nil {
-		return fmt.Errorf("send init: %w", err)
+	if err := grpcStream.Send(bindReq); err != nil {
+		return fmt.Errorf("send bind: %w", err)
 	}
 
-	initResp, err := grpcStream.Recv()
+	bindResp, err := grpcStream.Recv()
 	if err != nil {
-		return fmt.Errorf("receive init response: %w", err)
+		return fmt.Errorf("receive bind response: %w", err)
 	}
-	if initResp, ok := initResp.Response.(*pb.FujinResponse_Init); ok && initResp.Init.Error != "" {
-		return fmt.Errorf("init error: %s", initResp.Init.Error)
+	if bindResp, ok := bindResp.Response.(*FujinResponse_Bind); ok && bindResp.Bind.Error != "" {
+		return fmt.Errorf("bind error: %s", bindResp.Bind.Error)
 	}
 
 	// resubscribe existing subscriptions
@@ -290,13 +297,13 @@ func (s *stream) resubscribeAll() error {
 		// send subscribe again based on type
 		ch := make(chan uint32, 1)
 		var corrID uint32
-		var req *pb.FujinRequest
+		var req *FujinRequest
 		if sub.withHeaders {
 			corrID = s.hsubscribeCorrelator.Next(ch)
-			req = &pb.FujinRequest{Request: &pb.FujinRequest_Hsubscribe{Hsubscribe: &pb.HSubscribeRequest{CorrelationId: corrID, Topic: sub.topic, AutoCommit: sub.autoCommit}}}
+			req = &FujinRequest{Request: &FujinRequest_Hsubscribe{Hsubscribe: &HSubscribeRequest{CorrelationId: corrID, Topic: sub.topic, AutoCommit: sub.autoCommit}}}
 		} else {
 			corrID = s.subscribeCorrelator.Next(ch)
-			req = &pb.FujinRequest{Request: &pb.FujinRequest_Subscribe{Subscribe: &pb.SubscribeRequest{CorrelationId: corrID, Topic: sub.topic, AutoCommit: sub.autoCommit}}}
+			req = &FujinRequest{Request: &FujinRequest_Subscribe{Subscribe: &SubscribeRequest{CorrelationId: corrID, Topic: sub.topic, AutoCommit: sub.autoCommit}}}
 		}
 
 		if err := s.grpcStream.Send(req); err != nil {
@@ -313,7 +320,7 @@ func (s *stream) resubscribeAll() error {
 			return fmt.Errorf("receive resubscribe response: %w", err)
 		}
 
-		if subscribeResp, ok := resp.Response.(*pb.FujinResponse_Subscribe); ok {
+		if subscribeResp, ok := resp.Response.(*FujinResponse_Subscribe); ok {
 			newID := subscribeResp.Subscribe.SubscriptionId
 			if subscribeResp.Subscribe.Error != "" {
 				return fmt.Errorf("resubscribe error: %s", subscribeResp.Subscribe.Error)
@@ -331,7 +338,7 @@ func (s *stream) resubscribeAll() error {
 			s.logger.Info("resubscribed", "topic", sub.topic, "subscription_id", newID)
 		}
 
-		if subscribeResp, ok := resp.Response.(*pb.FujinResponse_Hsubscribe); ok {
+		if subscribeResp, ok := resp.Response.(*FujinResponse_Hsubscribe); ok {
 			newID := subscribeResp.Hsubscribe.SubscriptionId
 			if subscribeResp.Hsubscribe.Error != "" {
 				return fmt.Errorf("resubscribe error: %s", subscribeResp.Hsubscribe.Error)
@@ -354,39 +361,39 @@ func (s *stream) resubscribeAll() error {
 }
 
 // routeResponse routes incoming responses to appropriate correlators
-func (s *stream) routeResponse(resp *pb.FujinResponse) {
+func (s *stream) routeResponse(resp *FujinResponse) {
 	switch r := resp.Response.(type) {
-	case *pb.FujinResponse_Init:
+	case *FujinResponse_Bind:
 		select {
 		case s.responseCh <- resp:
 		case <-s.ctx.Done():
 			return
 		}
-	case *pb.FujinResponse_Produce:
+	case *FujinResponse_Produce:
 		if r.Produce.Error != "" {
 			s.produceCorrelator.Send(r.Produce.CorrelationId, fmt.Errorf("produce error: %s", r.Produce.Error))
 		} else {
 			s.produceCorrelator.Send(r.Produce.CorrelationId, nil)
 		}
-	case *pb.FujinResponse_Hproduce:
+	case *FujinResponse_Hproduce:
 		if r.Hproduce.Error != "" {
 			s.produceCorrelator.Send(r.Hproduce.CorrelationId, fmt.Errorf("hproduce error: %s", r.Hproduce.Error))
 		} else {
 			s.produceCorrelator.Send(r.Hproduce.CorrelationId, nil)
 		}
-	case *pb.FujinResponse_Subscribe:
+	case *FujinResponse_Subscribe:
 		if r.Subscribe.Error != "" {
 			s.subscribeCorrelator.Send(r.Subscribe.CorrelationId, 0)
 		} else {
 			s.subscribeCorrelator.Send(r.Subscribe.CorrelationId, r.Subscribe.SubscriptionId)
 		}
-	case *pb.FujinResponse_Hsubscribe:
+	case *FujinResponse_Hsubscribe:
 		if r.Hsubscribe.Error != "" {
 			s.hsubscribeCorrelator.Send(r.Hsubscribe.CorrelationId, 0)
 		} else {
 			s.hsubscribeCorrelator.Send(r.Hsubscribe.CorrelationId, r.Hsubscribe.SubscriptionId)
 		}
-	case *pb.FujinResponse_Fetch:
+	case *FujinResponse_Fetch:
 		result := models.FetchResult{
 			SubscriptionID: r.Fetch.SubscriptionId,
 			Messages:       make([]models.Msg, 0, len(r.Fetch.Messages)),
@@ -402,7 +409,7 @@ func (s *stream) routeResponse(resp *pb.FujinResponse) {
 			})
 		}
 		s.fetchCorrelator.Send(r.Fetch.CorrelationId, result)
-	case *pb.FujinResponse_Hfetch:
+	case *FujinResponse_Hfetch:
 		result := models.FetchResult{
 			SubscriptionID: r.Hfetch.SubscriptionId,
 			Messages:       make([]models.Msg, 0, len(r.Hfetch.Messages)),
@@ -423,31 +430,31 @@ func (s *stream) routeResponse(resp *pb.FujinResponse) {
 			})
 		}
 		s.hfetchCorrelator.Send(r.Hfetch.CorrelationId, result)
-	case *pb.FujinResponse_BeginTx:
+	case *FujinResponse_BeginTx:
 		if r.BeginTx.Error != "" {
 			s.beginTxCorrelator.Send(r.BeginTx.CorrelationId, fmt.Errorf("begin tx error: %s", r.BeginTx.Error))
 		} else {
 			s.beginTxCorrelator.Send(r.BeginTx.CorrelationId, nil)
 		}
-	case *pb.FujinResponse_CommitTx:
+	case *FujinResponse_CommitTx:
 		if r.CommitTx.Error != "" {
 			s.commitTxCorrelator.Send(r.CommitTx.CorrelationId, fmt.Errorf("commit tx error: %s", r.CommitTx.Error))
 		} else {
 			s.commitTxCorrelator.Send(r.CommitTx.CorrelationId, nil)
 		}
-	case *pb.FujinResponse_RollbackTx:
+	case *FujinResponse_RollbackTx:
 		if r.RollbackTx.Error != "" {
 			s.rollbackTxCorrelator.Send(r.RollbackTx.CorrelationId, fmt.Errorf("rollback tx error: %s", r.RollbackTx.Error))
 		} else {
 			s.rollbackTxCorrelator.Send(r.RollbackTx.CorrelationId, nil)
 		}
-	case *pb.FujinResponse_Unsubscribe:
+	case *FujinResponse_Unsubscribe:
 		if r.Unsubscribe.Error != "" {
 			s.unsubscribeCorrelator.Send(r.Unsubscribe.CorrelationId, fmt.Errorf("unsubscribe error: %s", r.Unsubscribe.Error))
 		} else {
 			s.unsubscribeCorrelator.Send(r.Unsubscribe.CorrelationId, nil)
 		}
-	case *pb.FujinResponse_Message:
+	case *FujinResponse_Message:
 		s.subsMu.RLock()
 		if sub, exists := s.subscriptions[r.Message.SubscriptionId]; exists {
 			sub.handler(models.Msg{
@@ -458,7 +465,7 @@ func (s *stream) routeResponse(resp *pb.FujinResponse) {
 			})
 		}
 		s.subsMu.RUnlock()
-	case *pb.FujinResponse_Hmessage:
+	case *FujinResponse_Hmessage:
 		s.subsMu.RLock()
 		if sub, exists := s.subscriptions[r.Hmessage.SubscriptionId]; exists {
 			headers := make(map[string]string, len(r.Hmessage.Headers))
@@ -473,7 +480,7 @@ func (s *stream) routeResponse(resp *pb.FujinResponse) {
 			})
 		}
 		s.subsMu.RUnlock()
-	case *pb.FujinResponse_Ack:
+	case *FujinResponse_Ack:
 		result := models.AckResult{}
 		if r.Ack.Error != "" {
 			result.Error = fmt.Errorf("ack error: %s", r.Ack.Error)
@@ -490,7 +497,7 @@ func (s *stream) routeResponse(resp *pb.FujinResponse) {
 			}
 		}
 		s.ackCorrelator.Send(r.Ack.CorrelationId, result)
-	case *pb.FujinResponse_Nack:
+	case *FujinResponse_Nack:
 		result := models.NackResult{}
 		if r.Nack.Error != "" {
 			result.Error = fmt.Errorf("nack error: %s", r.Nack.Error)
@@ -528,9 +535,9 @@ func (s *stream) produce(topic string, p []byte) error {
 	ch := make(chan error, 1)
 	correlationID := s.produceCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Produce{
-			Produce: &pb.ProduceRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Produce{
+			Produce: &ProduceRequest{
 				CorrelationId: correlationID,
 				Topic:         topic,
 				Message:       p,
@@ -574,17 +581,17 @@ func (s *stream) hproduce(topic string, p []byte, headers map[string]string) err
 	ch := make(chan error, 1)
 	correlationID := s.produceCorrelator.Next(ch)
 
-	protoHeaders := make([]*pb.Header, 0, len(headers))
+	protoHeaders := make([]*KV, 0, len(headers))
 	for k, v := range headers {
-		protoHeaders = append(protoHeaders, &pb.Header{
+		protoHeaders = append(protoHeaders, &KV{
 			Key:   stringToBytes(k),
 			Value: stringToBytes(v),
 		})
 	}
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Hproduce{
-			Hproduce: &pb.HProduceRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Hproduce{
+			Hproduce: &HProduceRequest{
 				CorrelationId: correlationID,
 				Topic:         topic,
 				Headers:       protoHeaders,
@@ -628,9 +635,9 @@ func (s *stream) subscribe(topic string, autoCommit bool, handler func(msg model
 	ch := make(chan uint32, 1)
 	correlationID := s.subscribeCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Subscribe{
-			Subscribe: &pb.SubscribeRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Subscribe{
+			Subscribe: &SubscribeRequest{
 				CorrelationId: correlationID,
 				Topic:         topic,
 				AutoCommit:    autoCommit,
@@ -695,9 +702,9 @@ func (s *stream) hsubscribe(topic string, autoCommit bool, handler func(msg mode
 	ch := make(chan uint32, 1)
 	correlationID := s.hsubscribeCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Hsubscribe{
-			Hsubscribe: &pb.HSubscribeRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Hsubscribe{
+			Hsubscribe: &HSubscribeRequest{
 				CorrelationId: correlationID,
 				Topic:         topic,
 				AutoCommit:    autoCommit,
@@ -763,9 +770,9 @@ func (s *stream) fetch(topic string, autoCommit bool, batchSize uint32) (models.
 	ch := make(chan models.FetchResult, 1)
 	correlationID := s.fetchCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Fetch{
-			Fetch: &pb.FetchRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Fetch{
+			Fetch: &FetchRequest{
 				CorrelationId: correlationID,
 				Topic:         topic,
 				AutoCommit:    autoCommit,
@@ -810,9 +817,9 @@ func (s *stream) hfetch(topic string, autoCommit bool, batchSize uint32) (models
 	ch := make(chan models.FetchResult, 1)
 	correlationID := s.hfetchCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Hfetch{
-			Hfetch: &pb.HFetchRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Hfetch{
+			Hfetch: &HFetchRequest{
 				CorrelationId: correlationID,
 				Topic:         topic,
 				AutoCommit:    autoCommit,
@@ -852,9 +859,9 @@ func (s *stream) BeginTx() error {
 	ch := make(chan error, 1)
 	correlationID := s.beginTxCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_BeginTx{
-			BeginTx: &pb.BeginTxRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_BeginTx{
+			BeginTx: &BeginTxRequest{
 				CorrelationId: correlationID,
 			},
 		},
@@ -891,9 +898,9 @@ func (s *stream) CommitTx() error {
 	ch := make(chan error, 1)
 	correlationID := s.commitTxCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_CommitTx{
-			CommitTx: &pb.CommitTxRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_CommitTx{
+			CommitTx: &CommitTxRequest{
 				CorrelationId: correlationID,
 			},
 		},
@@ -930,9 +937,9 @@ func (s *stream) RollbackTx() error {
 	ch := make(chan error, 1)
 	correlationID := s.rollbackTxCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_RollbackTx{
-			RollbackTx: &pb.RollbackTxRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_RollbackTx{
+			RollbackTx: &RollbackTxRequest{
 				CorrelationId: correlationID,
 			},
 		},
@@ -965,7 +972,7 @@ func (s *stream) handleMessages(sub *subscription) {
 		case <-s.ctx.Done():
 			return
 		case resp := <-s.responseCh:
-			if msgResp, ok := resp.Response.(*pb.FujinResponse_Message); ok {
+			if msgResp, ok := resp.Response.(*FujinResponse_Message); ok {
 				if msgResp.Message.SubscriptionId == sub.id {
 					sub.handler(models.Msg{
 						SubscriptionID: msgResp.Message.SubscriptionId,
@@ -1013,9 +1020,9 @@ func (s *stream) Unsubscribe(subscriptionID uint32) error {
 	ch := make(chan error, 1)
 	correlationID := s.unsubscribeCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Unsubscribe{
-			Unsubscribe: &pb.UnsubscribeRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Unsubscribe{
+			Unsubscribe: &UnsubscribeRequest{
 				CorrelationId:  correlationID,
 				SubscriptionId: subscriptionID,
 			},
@@ -1067,9 +1074,9 @@ func (s *stream) Ack(subscriptionID uint32, messageIDs ...[]byte) (models.AckRes
 	ch := make(chan models.AckResult, 1)
 	correlationID := s.ackCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Ack{
-			Ack: &pb.AckRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Ack{
+			Ack: &AckRequest{
 				CorrelationId:  correlationID,
 				MessageIds:     messageIDs,
 				SubscriptionId: subscriptionID,
@@ -1116,9 +1123,9 @@ func (s *stream) Nack(subscriptionID uint32, messageIDs ...[]byte) (models.NackR
 	ch := make(chan models.NackResult, 1)
 	correlationID := s.nackCorrelator.Next(ch)
 
-	req := &pb.FujinRequest{
-		Request: &pb.FujinRequest_Nack{
-			Nack: &pb.NackRequest{
+	req := &FujinRequest{
+		Request: &FujinRequest_Nack{
+			Nack: &NackRequest{
 				CorrelationId:  correlationID,
 				MessageIds:     messageIDs,
 				SubscriptionId: subscriptionID,

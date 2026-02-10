@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/fujin-io/fujin-go/config"
+	fujin_go "github.com/fujin-io/fujin-go"
 	"github.com/fujin-io/fujin-go/correlator"
 	"github.com/fujin-io/fujin-go/fujin/pool"
 	v1 "github.com/fujin-io/fujin/public/proto/fujin/v1"
@@ -45,60 +45,74 @@ type Stream struct {
 	l *slog.Logger
 }
 
-func (c *Conn) Init(configOverrides map[string]string) (*Stream, error) {
-	return c.InitWith(configOverrides, nil)
-}
+func (c *Conn) Bind(connector string, opts ...fujin_go.BindOption) (*Stream, error) {
+	conf := &fujin_go.BindConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(conf)
+		}
+	}
 
-func (c *Conn) InitWith(configOverrides map[string]string, cfg *config.StreamConfig) (*Stream, error) {
 	stream, err := c.qconn.OpenStream()
 	if err != nil {
 		return nil, fmt.Errorf("open stream: %w", err)
 	}
 
-	buflen := 1 + Uint16Len
-	for k, v := range configOverrides {
-		buflen += Uint32Len + len(k) + Uint32Len + len(v)
+	buflen := 1 + Uint32Len + len(connector) + Uint16Len + Uint16Len
+	if conf.Meta != nil {
+		for k, v := range conf.Meta {
+			buflen += Uint32Len + len(k) + Uint32Len + len(v)
+		}
+	}
+	if conf.ConfigOverrides != nil {
+		for k, v := range conf.ConfigOverrides {
+			buflen += Uint32Len + len(k) + Uint32Len + len(v)
+		}
 	}
 
 	buf := pool.Get(buflen)
 	defer pool.Put(buf)
 
-	buf = append(buf, byte(v1.OP_CODE_INIT))
-	buf = AppendFujinUint16StringArray(buf, configOverrides)
+	buf = append(buf, byte(v1.OP_CODE_BIND))
+	buf = AppendFujinString(buf, connector)
+	buf = AppendFujinUint16StringArray(buf, conf.Meta)
+	buf = AppendFujinUint16StringArray(buf, conf.ConfigOverrides)
+
+	fmt.Println(buf)
 
 	if _, err := stream.Write(buf); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("write init: %w", err)
+		return nil, fmt.Errorf("write bind: %w", err)
 	}
 
-	initRespBuf := pool.Get(1 + 1 + Uint32Len + 512) // max reasonable error size
+	bindRespBuf := pool.Get(1 + 1 + Uint32Len + 512)[:1+1+Uint32Len+512] // max reasonable error size
 
-	if _, err := io.ReadFull(stream, initRespBuf[:1]); err != nil {
+	if _, err := io.ReadFull(stream, bindRespBuf[:1]); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("read init response code: %w", err)
+		return nil, fmt.Errorf("read bind response code: %w", err)
 	}
 
-	const RESP_CODE_INIT = byte(v1.RESP_CODE_INIT)
-	if initRespBuf[0] != RESP_CODE_INIT {
+	const RESP_CODE_INIT = byte(v1.RESP_CODE_BIND)
+	if bindRespBuf[0] != RESP_CODE_INIT {
 		stream.Close()
-		return nil, fmt.Errorf("unexpected init response code: %d, expected %d", initRespBuf[0], RESP_CODE_INIT)
+		return nil, fmt.Errorf("unexpected bind response code: %d, expected %d", bindRespBuf[0], RESP_CODE_INIT)
 	}
 
-	if _, err := io.ReadFull(stream, initRespBuf[1:2]); err != nil {
+	if _, err := io.ReadFull(stream, bindRespBuf[1:2]); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("read init error nullability: %w", err)
+		return nil, fmt.Errorf("read bind error nullability: %w", err)
 	}
 
-	if initRespBuf[1] != 0 {
-		if _, err := io.ReadFull(stream, initRespBuf[2:6]); err != nil {
+	if bindRespBuf[1] != 0 {
+		if _, err := io.ReadFull(stream, bindRespBuf[2:6]); err != nil {
 			stream.Close()
-			return nil, fmt.Errorf("read init error length: %w", err)
+			return nil, fmt.Errorf("read bind error length: %w", err)
 		}
 
-		errorLen := binary.BigEndian.Uint32(initRespBuf[2:6])
+		errorLen := binary.BigEndian.Uint32(bindRespBuf[2:6])
 		if errorLen == 0 {
 			stream.Close()
-			return nil, fmt.Errorf("invalid init error length: 0")
+			return nil, fmt.Errorf("invalid bind error length: 0")
 		}
 
 		errorBuf := pool.Get(int(errorLen))
@@ -106,11 +120,11 @@ func (c *Conn) InitWith(configOverrides map[string]string, cfg *config.StreamCon
 
 		if _, err := io.ReadFull(stream, errorBuf[:errorLen]); err != nil {
 			stream.Close()
-			return nil, fmt.Errorf("read init error message: %w", err)
+			return nil, fmt.Errorf("read bind error message: %w", err)
 		}
 
 		stream.Close()
-		return nil, fmt.Errorf("init error: %s", string(errorBuf[:errorLen]))
+		return nil, fmt.Errorf("bind error: %s", string(errorBuf[:errorLen]))
 	}
 
 	l := c.l.With("quic_stream_id", stream.StreamID())
@@ -417,6 +431,7 @@ func (s *Stream) readLoop() {
 		if err != nil {
 			if err == io.EOF {
 				if n != 0 {
+					fmt.Println(buf[:n])
 					err = s.parse(buf[:n])
 					if err != nil {
 						s.l.Error("writer read loop", "err", err)
@@ -431,6 +446,7 @@ func (s *Stream) readLoop() {
 			continue
 		}
 
+		fmt.Println(buf[:n])
 		err = s.parse(buf[:n])
 		if err != nil {
 			s.l.Error("writer read loop", "err", err)
@@ -776,7 +792,7 @@ func (s *Stream) parse(buf []byte) error {
 					pool.Put(s.ps.argBuf)
 					pool.Put(s.ps.ca.cID)
 					s.quicStream.Close()
-					err = fmt.Errorf("parse write err len arg: %w", err)
+					err = fmt.Errorf("parse fetch err len arg: %w", err)
 					s.ps.fa.err <- err
 					close(s.ps.fa.err)
 					return err
@@ -982,7 +998,7 @@ func (s *Stream) parse(buf []byte) error {
 					pool.Put(s.ps.argBuf)
 					pool.Put(s.ps.ca.cID)
 					s.quicStream.Close()
-					err = fmt.Errorf("parse write err len arg: %w", err)
+					err = fmt.Errorf("parse hfetch err len arg: %w", err)
 					s.ps.fa.err <- err
 					close(s.ps.fa.err)
 					return err
@@ -1052,8 +1068,8 @@ func (s *Stream) parse(buf []byte) error {
 				s.ps.fa.headerCount = binary.BigEndian.Uint16(s.ps.argBuf)
 				pool.Put(s.ps.argBuf)
 				s.ps.argBuf = nil
-				if s.ps.ma.headerCount <= 0 {
-					if s.ps.ma.sub.autoCommit {
+				if s.ps.fa.headerCount <= 0 {
+					if s.ps.fa.autoCommit {
 						s.ps.state = OP_FETCH_H_MSG_ARG
 						continue
 					}

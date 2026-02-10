@@ -40,10 +40,7 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Init(map[string]string{
-		"writer.pub.key":   "value",
-		"writer.pub.topic": "another_topic",
-	})
+	s, err := conn.Bind("kafka_connector", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -66,10 +63,10 @@ func main() {
 		case <-ctx.Done():
 			return
 		default:
-			if err := s.Produce("pub", data); err != nil {
+			if err := s.Produce("client1", data); err != nil {
 				log.Fatal(err)
 			}
-			if err := s.HProduce("pub", data, map[string]string{
+			if err := s.HProduce("client1", data, map[string]string{
 				"key": "value",
 			}); err != nil {
 				log.Fatal(err)
