@@ -78,8 +78,6 @@ func (c *Conn) Bind(connector string, opts ...fujin_go.BindOption) (*Stream, err
 	buf = AppendFujinUint16StringArray(buf, conf.Meta)
 	buf = AppendFujinUint16StringArray(buf, conf.ConfigOverrides)
 
-	fmt.Println(buf)
-
 	if _, err := stream.Write(buf); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("write bind: %w", err)
@@ -431,7 +429,6 @@ func (s *Stream) readLoop() {
 		if err != nil {
 			if err == io.EOF {
 				if n != 0 {
-					fmt.Println(buf[:n])
 					err = s.parse(buf[:n])
 					if err != nil {
 						s.l.Error("writer read loop", "err", err)
@@ -446,7 +443,6 @@ func (s *Stream) readLoop() {
 			continue
 		}
 
-		fmt.Println(buf[:n])
 		err = s.parse(buf[:n])
 		if err != nil {
 			s.l.Error("writer read loop", "err", err)
@@ -1186,7 +1182,6 @@ func (s *Stream) parse(buf []byte) error {
 				s.ps.payloadBuf = append(s.ps.payloadBuf, b)
 
 				if len(s.ps.payloadBuf) >= int(s.ps.ma.len) {
-					fmt.Println(s.ps.fa.headers)
 					s.ps.fa.msgs = append(s.ps.fa.msgs, Msg{
 						Value:   s.ps.payloadBuf,
 						Headers: s.ps.fa.headers,

@@ -140,7 +140,7 @@ func newStream(
 	return s, nil
 }
 
-// start bindializes the gRPC stream and starts response handling
+// start binds the gRPC stream and starts response handling
 func (s *stream) start() error {
 	grpcStream, err := s.client.Stream(s.ctx)
 	if err != nil {
@@ -173,7 +173,7 @@ func (s *stream) start() error {
 				return fmt.Errorf("bind error: %s", bindResp.Bind.Error)
 			}
 			s.connected.Store(true)
-			s.logger.Info("stream bindialized")
+			s.logger.Info("stream bond")
 			return nil
 		}
 		return fmt.Errorf("unexpected bind response")
