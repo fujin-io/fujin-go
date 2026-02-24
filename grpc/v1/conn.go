@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	fujin_go "github.com/fujin-io/fujin-go"
+	v1 "github.com/fujin-io/fujin/public/proto/grpc/v1"
 	"google.golang.org/grpc"
 )
 
@@ -13,7 +14,7 @@ import (
 type conn struct {
 	addr     string
 	grpcConn *grpc.ClientConn
-	client   FujinServiceClient
+	client   v1.FujinServiceClient
 	logger   *slog.Logger
 	mu       sync.RWMutex
 	closed   bool
@@ -36,7 +37,7 @@ func Dial(addr string, logger *slog.Logger, opts ...grpc.DialOption) (fujin_go.C
 	}
 
 	c.grpcConn = grpcConn
-	c.client = NewFujinServiceClient(grpcConn)
+	c.client = v1.NewFujinServiceClient(grpcConn)
 
 	c.logger.Info("connected to server", "address", addr)
 	return c, nil
