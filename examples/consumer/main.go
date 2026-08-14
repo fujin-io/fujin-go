@@ -39,26 +39,26 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Bind("kafka_connector")
+	s, err := conn.Bind(ctx, "kafka_connector")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Println("stream connected")
 
-	defer s.Close()
+	defer s.Close(context.Background())
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			msgs, err := s.Fetch(ctx, "client2", 1, true)
+			result, err := s.Fetch(ctx, "client2", true, 1)
 			if err != nil {
 				log.Fatal(err)
 			}
-			for _, msg := range msgs {
-				fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
+			for _, msg := range result.Messages {
+				fmt.Println("Value:", string(msg.Payload), "Headers:", msg.Headers)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}

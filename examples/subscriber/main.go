@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"time"
 
+	client "github.com/fujin-io/fujin-go"
 	"github.com/fujin-io/fujin-go/fujin"
 )
 
@@ -39,7 +40,7 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Bind("kafka_connector", nil)
+	s, err := conn.Bind(ctx, "connector")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,25 +48,26 @@ func main() {
 	fmt.Println("stream connected")
 
 	defer fmt.Println("stream closed")
-	defer s.Close()
+	defer s.Close(context.Background())
 
-	sub, err := s.HSubscribe("client2", true, func(msg fujin.Msg) {
-		fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
+	sub, err := s.HSubscribe(ctx, "sub", true, func(msg client.Message) {
+		fmt.Println("Value:", string(msg.Payload), "Headers:", msg.Headers)
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fmt.Println("subscription closed")
-	defer sub.Close()
+	fmt.Println("subscription 1 connected")
+	defer fmt.Println("subscription 1 closed")
+	defer sub.Close(context.Background())
 
-	sub2, err := s.HSubscribe("client2", true, func(msg fujin.Msg) {
-		fmt.Println("Value:", string(msg.Value), "Headers:", msg.Headers)
+	sub2, err := s.HSubscribe(ctx, "sub", true, func(msg client.Message) {
+		fmt.Println("Value:", string(msg.Payload), "Headers:", msg.Headers)
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer fmt.Println("subscription 2 closed")
-	defer sub2.Close()
+	defer sub2.Close(context.Background())
 
 	fmt.Println("subscribed")
 

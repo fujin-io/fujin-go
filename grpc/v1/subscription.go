@@ -1,33 +1,21 @@
 package v1
 
 import (
+	"context"
 	"sync/atomic"
-
-	"github.com/fujin-io/fujin-go/models"
 )
 
-// subscription implements the Subscription interface
 type subscription struct {
-	id          uint32
-	topic       string
-	handler     func(msg models.Msg)
-	stream      *stream
-	closed      atomic.Bool
-	autoCommit  bool
-	withHeaders bool
+	id     uint32
+	stream *stream
+	closed atomic.Bool
 }
 
-// Close closes the subscription
-func (s *subscription) Close() error {
-	if s.closed.Load() {
+func (s *subscription) ID() uint32 { return s.id }
+
+func (s *subscription) Close(ctx context.Context) error {
+	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-
-	s.closed.Store(true)
-
-	s.stream.subsMu.Lock()
-	delete(s.stream.subscriptions, s.id)
-	s.stream.subsMu.Unlock()
-
-	return nil
+	return s.stream.Unsubscribe(ctx, s.id)
 }

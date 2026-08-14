@@ -7,20 +7,18 @@ import (
 	"sync"
 	"time"
 
-	fujin_go "github.com/fujin-io/fujin-go"
-	"github.com/fujin-io/fujin-go/models"
+	client "github.com/fujin-io/fujin-go"
 )
 
 // Subscriber provides high-performance message consumption
 type Subscriber struct {
-	stream fujin_go.Stream
+	stream client.Stream
 	logger *slog.Logger
 
-	maxConcurrent int
+	workerTimeout time.Duration
 
-	messageCh     chan models.Msg
-	workerPool    chan struct{}
-	handleMessage func(ctx context.Context, msg models.Msg) error
+	messageCh     chan client.Message
+	handleMessage func(ctx context.Context, msg client.Message) error
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -44,8 +42,7 @@ func DefaultConsumerConfig() *ConsumerConfig {
 	}
 }
 
-// NewSubscriber creates a new high-performance consumer
-func NewSubscriber(stream fujin_go.Stream, config *ConsumerConfig, logger *slog.Logger) *Subscriber {
+func NewSubscriber(stream client.Stream, config *ConsumerConfig, logger *slog.Logger) *Subscriber {
 	if config == nil {
 		config = DefaultConsumerConfig()
 	}
@@ -58,10 +55,9 @@ func NewSubscriber(stream fujin_go.Stream, config *ConsumerConfig, logger *slog.
 	consumer := &Subscriber{
 		stream:        stream,
 		logger:        logger.With("component", "subscriber"),
-		maxConcurrent: config.MaxConcurrent,
-		messageCh:     make(chan models.Msg, config.BufferSize),
-		workerPool:    make(chan struct{}, config.MaxConcurrent),
-		handleMessage: func(ctx context.Context, msg models.Msg) error { return nil },
+		workerTimeout: config.WorkerTimeout,
+		messageCh:     make(chan client.Message, config.BufferSize),
+		handleMessage: func(ctx context.Context, msg client.Message) error { return nil },
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -76,27 +72,19 @@ func NewSubscriber(stream fujin_go.Stream, config *ConsumerConfig, logger *slog.
 }
 
 // Subscribe subscribes to a topic with high-performance processing
-func (c *Subscriber) Subscribe(topic string, autoCommit bool, handler func(ctx context.Context, msg models.Msg) error) error {
-	// Create a wrapper handler that processes messages through the worker pool
-	wrapperHandler := func(msg models.Msg) {
+func (c *Subscriber) Subscribe(route string, autoSettle bool, handler func(ctx context.Context, msg client.Message) error) error {
+	c.handleMessage = handler
+	_, err := c.stream.Subscribe(c.ctx, route, autoSettle, func(msg client.Message) {
 		select {
 		case c.messageCh <- msg:
-			// Message queued for processing
 		case <-c.ctx.Done():
-			// Consumer is closing
 		default:
-			// Buffer is full, drop message
-			c.logger.Warn("message buffer full, dropping message", "topic", topic)
+			c.logger.Warn("message buffer full, dropping message", "route", route)
 		}
-	}
-
-	// Subscribe using the stream
-	subscriptionID, err := c.stream.Subscribe(topic, autoCommit, wrapperHandler)
+	})
 	if err != nil {
-		return fmt.Errorf("failed to subscribe: %w", err)
+		return fmt.Errorf("subscribe: %w", err)
 	}
-
-	c.logger.Info("subscribed to topic", "topic", topic, "subscription_id", subscriptionID)
 	return nil
 }
 
@@ -115,8 +103,8 @@ func (c *Subscriber) worker(workerID int) {
 }
 
 // processMessage processes a single message
-func (c *Subscriber) processMessage(workerID int, msg models.Msg) {
-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+func (c *Subscriber) processMessage(workerID int, msg client.Message) {
+	ctx, cancel := context.WithTimeout(c.ctx, c.workerTimeout)
 	defer cancel()
 
 	if err := c.handleMessage(ctx, msg); err != nil {
@@ -130,11 +118,7 @@ func (c *Subscriber) processMessage(workerID int, msg models.Msg) {
 // Close closes the consumer
 func (c *Subscriber) Close() error {
 	c.cancel()
-
-	close(c.messageCh)
-
 	c.wg.Wait()
-
 	c.logger.Info("subscriber closed")
 	return nil
 }

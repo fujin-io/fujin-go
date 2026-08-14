@@ -2,329 +2,150 @@ package fujin_test
 
 import (
 	"context"
-	"log/slog"
-	"os"
 	"testing"
 	"time"
 
+	client "github.com/fujin-io/fujin-go"
 	"github.com/fujin-io/fujin-go/fujin"
+	"github.com/fujin-io/fujin-go/internal/session"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestStream(t *testing.T) {
-	t.Run("connect", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+func TestNativeClientSessionContract(t *testing.T) {
+	server := startNativeTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		fs, shutdown := RunTestServer(ctx)
-		defer func() {
-			cancel()
-			shutdown()
-			<-fs.Done()
-		}()
+	conn, err := fujin.Dial(ctx, server.addr(), server.clientTLS, nil)
+	require.NoError(t, err)
+	defer conn.Close()
 
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil,
-			fujin.WithLogger(
-				slog.New(
-					slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-						AddSource: true,
-						Level:     slog.LevelDebug,
-					}),
-				),
-			))
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
+	stream, err := conn.Bind(ctx, "connector", client.WithMeta(map[string]string{"tenant": "test"}), client.WithConfigOverrides(map[string]string{"writer.pub.mode": "test"}))
+	require.NoError(t, err)
 
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
+	routes := stream.Routes()
+	require.Len(t, routes, 3)
+	assert.Equal(t, client.RouteCapabilities{Produce: true, Headers: true, ProduceGuarantee: client.ProduceGuaranteeLocalAccept}, routes["pub"])
+	assert.Equal(t, client.RouteCapabilities{Produce: true, Headers: true, Transactions: true, ProduceGuarantee: client.ProduceGuaranteeLocalAccept}, routes["tx"])
+	assert.Equal(t, client.RouteCapabilities{Headers: true, Subscribe: true, Fetch: true, ManualSettlement: true, AckGranularity: client.AckSingle, NackEffect: client.NackDrop}, routes["sub"])
+	delete(routes, "pub")
+	assert.Contains(t, stream.Routes(), "pub")
 
-	t.Run("success with id", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	require.NoError(t, stream.Produce(ctx, "pub", []byte("message")))
+	require.NoError(t, stream.HProduce(ctx, "pub", []byte("message"), []client.Header{{Key: []byte("key"), Value: []byte("value")}}))
 
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
+	err = stream.Produce(ctx, "missing", []byte("message"))
+	var operationErr *client.OperationError
+	require.ErrorAs(t, err, &operationErr)
+	assert.Equal(t, client.StatusNotFound, operationErr.Code)
+	assert.Equal(t, client.OutcomeNotApplied, operationErr.Outcome)
+	assert.Equal(t, "ROUTE_NOT_FOUND", operationErr.Reason)
 
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
+	require.NoError(t, stream.BeginTx(ctx, "tx"))
+	require.ErrorIs(t, stream.Produce(ctx, "pub", []byte("not-transactional")), session.ErrTransactionActive)
+	require.NoError(t, stream.TxProduce(ctx, []byte("transaction-message")))
+	require.NoError(t, stream.TxHProduce(ctx, []byte("transaction-message"), []client.Header{{Key: []byte("key"), Value: []byte("value")}}))
+	require.NoError(t, stream.CommitTx(ctx))
 
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
+	require.NoError(t, stream.BeginTx(ctx, "tx"))
+	require.NoError(t, stream.RollbackTx(ctx))
+	require.ErrorIs(t, stream.CommitTx(ctx), session.ErrNoTransaction)
 
-		err = stream.Produce("pub", []byte("test data"))
-		assert.NoError(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
+	fetch, err := stream.Fetch(ctx, "sub", false, 1)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(9), fetch.SubscriptionID)
+	require.Len(t, fetch.Messages, 1)
+	assert.Equal(t, []byte("fetch-id"), fetch.Messages[0].MessageID)
+	assert.Equal(t, []byte("fetched-message"), fetch.Messages[0].Payload)
 
-	t.Run("success empty id", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	hfetch, err := stream.HFetch(ctx, "sub", false, 1)
+	require.NoError(t, err)
+	require.Len(t, hfetch.Messages, 1)
+	assert.Equal(t, []client.Header{{Key: []byte("content-type"), Value: []byte("application/octet-stream")}}, hfetch.Messages[0].Headers)
 
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
+	ack, err := stream.Ack(ctx, fetch.SubscriptionID, fetch.Messages[0].MessageID)
+	require.NoError(t, err)
+	require.Len(t, ack, 1)
+	assert.Equal(t, fetch.Messages[0].MessageID, ack[0].MessageID)
+	assert.Nil(t, ack[0].Error)
 
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
+	nack, err := stream.Nack(ctx, hfetch.SubscriptionID, hfetch.Messages[0].MessageID)
+	require.NoError(t, err)
+	require.Len(t, nack, 1)
+	assert.Nil(t, nack[0].Error)
 
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
+	messages := make(chan client.Message, 2)
+	subscription, err := stream.Subscribe(ctx, "sub", false, func(message client.Message) { messages <- message })
+	require.NoError(t, err)
+	assert.Equal(t, uint32(7), subscription.ID())
+	select {
+	case message := <-messages:
+		assert.Equal(t, []byte("message-id"), message.MessageID)
+		assert.Equal(t, []byte("subscription-message"), message.Payload)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	require.NoError(t, subscription.Close(ctx))
+	require.NoError(t, subscription.Close(ctx))
 
-		err = stream.Produce("pub", []byte("test data"))
-		assert.NoError(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
+	headered, err := stream.HSubscribe(ctx, "sub", true, func(message client.Message) { messages <- message })
+	require.NoError(t, err)
+	select {
+	case message := <-messages:
+		assert.Empty(t, message.MessageID)
+		assert.Equal(t, []client.Header{{Key: []byte("content-type"), Value: []byte("text/plain")}}, message.Headers)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	require.NoError(t, headered.Close(ctx))
 
-	t.Run("non existent topic", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	select {
+	case err := <-server.ping:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
+	require.NoError(t, stream.Close(ctx))
+	require.NoError(t, stream.Close(ctx))
+	require.ErrorIs(t, stream.Produce(ctx, "pub", []byte("closed")), session.ErrClosed)
 
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
+	select {
+	case err := <-server.done:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
 
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
+func TestNativeClientLargeProduceFraming(t *testing.T) {
+	server := startNativeTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-		err = stream.Produce("non_existent_topic", []byte("test data"))
-		assert.Error(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
+	conn, err := fujin.Dial(ctx, server.addr(), server.clientTLS, nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	stream, err := conn.Bind(ctx, "connector")
+	require.NoError(t, err)
 
-	t.Run("write after close", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	payload := make([]byte, 1024*1024)
+	require.NoError(t, stream.Produce(ctx, "pub", payload))
+	require.NoError(t, stream.HProduce(ctx, "pub", payload, []client.Header{{Key: []byte("content-type"), Value: []byte("application/octet-stream")}}))
+	require.NoError(t, stream.Close(ctx))
+}
 
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
+func TestOperationErrorFallbackText(t *testing.T) {
+	assert.Equal(t, "reason", (&client.OperationError{Reason: "reason"}).Error())
+	assert.Equal(t, "fujin operation failed with status 13", (&client.OperationError{Code: client.StatusInternal}).Error())
+	assert.Equal(t, "", (*client.OperationError)(nil).Error())
+}
 
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect writer: %v", err)
-		}
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-		stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.Produce("pub", []byte("test data"))
-		assert.Error(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
-
-	// Begin transaction will not open transaction in underlying broker straight away.
-	// So it will return ok even with NATS under the hood.
-	t.Run("begin tx", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
-
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.BeginTx()
-		assert.NoError(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
-
-	// Commit transaction will do nothing, if no messages are written in it.
-	// So it will return ok even with NATS under the hood.
-	t.Run("commit tx", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
-
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		writer, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer writer.Close()
-		assert.NoError(t, writer.CheckParseStateAfterOpForTests())
-
-		err = writer.BeginTx()
-		assert.NoError(t, err)
-		assert.NoError(t, writer.CheckParseStateAfterOpForTests())
-
-		err = writer.CommitTx()
-		assert.NoError(t, err)
-		assert.NoError(t, writer.CheckParseStateAfterOpForTests())
-	})
-
-	// Rollback transaction will do nothing, if no messages are written in it.
-	// So it will return ok even with NATS under the hood.
-	t.Run("rollback tx", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
-
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.BeginTx()
-		assert.NoError(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.RollbackTx()
-		assert.NoError(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
-
-	// Write to NATS in transaction will return 'begin tx' error, because is is not supported.
-	t.Run("write msg in tx", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
-
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.BeginTx()
-		assert.NoError(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.Produce("pub", []byte("test data1"))
-		assert.Error(t, err)
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
-
-	t.Run("commit tx invalid tx state", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
-
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.CommitTx()
-		assert.Error(t, err)
-		assert.Equal(t, "invalid tx state", err.Error())
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
-
-	t.Run("rollback tx invalid state", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		_, shutdown := RunTestServer(ctx)
-		defer shutdown()
-
-		addr := "localhost:4848"
-		conn, err := fujin.Dial(ctx, addr, generateTLSConfig(), nil)
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer conn.Close()
-
-		stream, err := conn.Bind("test_connector")
-		if err != nil {
-			t.Fatalf("failed to connect: %v", err)
-		}
-		defer stream.Close()
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-
-		err = stream.RollbackTx()
-		assert.Error(t, err)
-		assert.Equal(t, "invalid tx state", err.Error())
-		assert.NoError(t, stream.CheckParseStateAfterOpForTests())
-	})
+func TestNativeSubscriptionIDRangeValidation(t *testing.T) {
+	stream := &fujin.Stream{}
+	err := stream.Unsubscribe(context.Background(), 256)
+	assert.EqualError(t, err, "subscription ID 256 exceeds native range")
+	_, err = stream.Ack(context.Background(), 256, []byte("message"))
+	assert.EqualError(t, err, "subscription ID 256 exceeds native range")
 }

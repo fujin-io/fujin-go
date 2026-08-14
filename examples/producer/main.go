@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"time"
 
+	client "github.com/fujin-io/fujin-go"
 	"github.com/fujin-io/fujin-go/fujin"
 )
 
@@ -40,14 +41,14 @@ func main() {
 
 	defer conn.Close()
 
-	s, err := conn.Bind("kafka_connector", nil)
+	s, err := conn.Bind(ctx, "connector")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Println("stream connected")
 
-	defer s.Close()
+	defer s.Close(context.Background())
 
 	msg := TestMsg{
 		Field: "test",
@@ -63,12 +64,12 @@ func main() {
 		case <-ctx.Done():
 			return
 		default:
-			if err := s.Produce("client1", data); err != nil {
+			if err := s.Produce(ctx, "pub", data); err != nil {
 				log.Fatal(err)
 			}
-			if err := s.HProduce("client1", data, map[string]string{
-				"key": "value",
-			}); err != nil {
+			if err := s.HProduce(ctx, "pub", data, []client.Header{{
+				Key: []byte("key"), Value: []byte("value"),
+			}}); err != nil {
 				log.Fatal(err)
 			}
 			fmt.Println("message sent")

@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/signal"
 
-	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
+	pb "github.com/fujin-io/fujin-go/grpc/v1/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -16,96 +16,57 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	// Connect to gRPC server
-	conn, err := grpc.NewClient("localhost:4849",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	conn, err := grpc.NewClient("localhost:4849", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Fatalf("connect: %v", err)
 	}
 	defer conn.Close()
 
-	client := pb.NewFujinServiceClient(conn)
-
-	// Open bidirectional stream
-	stream, err := client.Stream(ctx)
+	stream, err := pb.NewFujinServiceClient(conn).Stream(ctx)
 	if err != nil {
-		log.Fatalf("Failed to open stream: %v", err)
+		log.Fatalf("open stream: %v", err)
+	}
+	defer stream.CloseSend()
+
+	if err := stream.Send(&pb.FujinRequest{Request: &pb.FujinRequest_Bind{Bind: &pb.BindRequest{Connector: "connector"}}}); err != nil {
+		log.Fatalf("send bind: %v", err)
+	}
+	bind := mustReceive(stream).GetBind()
+	if bind == nil || bind.Error != nil {
+		log.Fatalf("bind failed: %v", bind)
+	}
+	if err := stream.Send(&pb.FujinRequest{Request: &pb.FujinRequest_Subscribe{Subscribe: &pb.SubscribeRequest{
+		CorrelationId: 1,
+		Route:         "sub",
+		AutoCommit:    true,
+	}}}); err != nil {
+		log.Fatalf("send subscribe: %v", err)
 	}
 
-	// Send CONNECT request
-	if err := stream.Send(&pb.FujinRequest{
-		Request: &pb.FujinRequest_Bind{
-			Bind: &pb.BindRequest{
-				ConfigOverrides: nil,
-			},
-		},
-	}); err != nil {
-		log.Fatalf("Failed to send connect: %v", err)
-	}
-
-	// Send SUBSCRIBE request
-	if err := stream.Send(&pb.FujinRequest{
-		Request: &pb.FujinRequest_Subscribe{
-			Subscribe: &pb.SubscribeRequest{
-				CorrelationId: 2,
-				Topic:         "sub",
-				AutoCommit:    true,
-			},
-		},
-	}); err != nil {
-		log.Fatalf("Failed to send subscribe: %v", err)
-	}
-
-	fmt.Println("✓ Subscribed to topic 'sub', waiting for messages...")
-	fmt.Println("Press Ctrl+C to exit")
-
-	// Receive messages
 	for {
-		resp, err := stream.Recv()
+		response, err := stream.Recv()
 		if err != nil {
 			if ctx.Err() != nil {
-				// Context cancelled, graceful shutdown
-				fmt.Println("\nShutting down...")
 				return
 			}
-			log.Printf("Receive error: %v", err)
-			return
+			log.Fatalf("receive: %v", err)
 		}
-
-		switch r := resp.Response.(type) {
-		case *pb.FujinResponse_Bind:
-			if r.Bind.Error != "" {
-				log.Printf("Bind error: %s", r.Bind.Error)
-			} else {
-				fmt.Println("✓ Initialized Fujin gRPC server")
-			}
-
+		switch value := response.GetResponse().(type) {
 		case *pb.FujinResponse_Subscribe:
-			if r.Subscribe.Error != "" {
-				log.Printf("Subscribe error: %s", r.Subscribe.Error)
-			} else {
-				fmt.Printf("✓ Subscribed successfully (subscription_id=%d)\n", r.Subscribe.SubscriptionId)
+			if value.Subscribe.Error != nil {
+				log.Fatalf("subscribe: %s", value.Subscribe.Error.Message)
 			}
-
+			fmt.Printf("subscribed subscription_id=%d\n", value.Subscribe.SubscriptionId)
 		case *pb.FujinResponse_Message:
-			fmt.Printf("\n📨 Received message:\n")
-			fmt.Printf("   Subscription ID: %d\n", r.Message.SubscriptionId)
-			fmt.Printf("   Payload: %s\n", string(r.Message.Payload))
-
-			if len(r.Message.MessageId) > 0 {
-				fmt.Printf("   Message ID: %x\n", r.Message.MessageId)
-			}
-
-		case *pb.FujinResponse_Ack:
-			if r.Ack.Error != "" {
-				log.Printf("Ack error: %s", r.Ack.Error)
-			} else {
-				fmt.Printf("✓ Message acknowledged (correlation_id=%d)\n", r.Ack.CorrelationId)
-			}
-
-		default:
-			fmt.Printf("Received unknown response type: %T\n", r)
+			fmt.Printf("subscription_id=%d payload=%s\n", value.Message.SubscriptionId, value.Message.Payload)
 		}
 	}
+}
+
+func mustReceive(stream pb.FujinService_StreamClient) *pb.FujinResponse {
+	response, err := stream.Recv()
+	if err != nil {
+		log.Fatalf("receive: %v", err)
+	}
+	return response
 }

@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package fujin.client.v1;
+
+option go_package = "github.com/fujin-io/fujin-go/grpc/v1/proto;proto";
+
+message KV { bytes key = 1; bytes value = 2; }
+
+enum StatusCode {
+  STATUS_OK = 0;
+  STATUS_CANCELED = 1;
+  STATUS_UNKNOWN = 2;
+  STATUS_INVALID_ARGUMENT = 3;
+  STATUS_DEADLINE_EXCEEDED = 4;
+  STATUS_NOT_FOUND = 5;
+  STATUS_ALREADY_EXISTS = 6;
+  STATUS_PERMISSION_DENIED = 7;
+  STATUS_RESOURCE_EXHAUSTED = 8;
+  STATUS_FAILED_PRECONDITION = 9;
+  STATUS_ABORTED = 10;
+  STATUS_OUT_OF_RANGE = 11;
+  STATUS_UNIMPLEMENTED = 12;
+  STATUS_INTERNAL = 13;
+  STATUS_UNAVAILABLE = 14;
+  STATUS_DATA_LOSS = 15;
+  STATUS_UNAUTHENTICATED = 16;
+}
+
+enum OperationOutcome { OUTCOME_UNSPECIFIED = 0; OUTCOME_NOT_APPLIED = 1; OUTCOME_APPLIED = 2; OUTCOME_UNKNOWN = 3; }
+message OperationError { StatusCode code = 1; OperationOutcome outcome = 2; string reason = 3; string message = 4; map<string, string> details = 5; }
+
+message BindRequest { string connector = 1; map<string, string> meta = 2; map<string, string> config_overrides = 3; }
+enum ProduceGuarantee { PRODUCE_GUARANTEE_UNSPECIFIED = 0; PRODUCE_GUARANTEE_LOCAL_ACCEPT = 1; PRODUCE_GUARANTEE_PEER_ACCEPT = 2; PRODUCE_GUARANTEE_DURABLE_ACCEPT = 3; }
+enum AckGranularity { ACK_GRANULARITY_UNSUPPORTED = 0; ACK_GRANULARITY_SINGLE = 1; ACK_GRANULARITY_CUMULATIVE = 2; }
+enum NackEffect { NACK_EFFECT_UNSUPPORTED = 0; NACK_EFFECT_REQUEUE = 1; NACK_EFFECT_RELEASE = 2; NACK_EFFECT_DROP = 3; }
+message RouteCapabilities { bool produce = 1; bool headers = 2; bool transactions = 3; bool subscribe = 4; bool fetch = 5; bool manual_settlement = 6; ProduceGuarantee produce_guarantee = 7; AckGranularity ack_granularity = 8; NackEffect nack_effect = 9; }
+message BindResponse { OperationError error = 1; map<string, RouteCapabilities> routes = 2; }
+
+message ProduceRequest { uint32 correlation_id = 1; string route = 2; bytes message = 3; }
+message ProduceResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message HProduceRequest { uint32 correlation_id = 1; string route = 2; repeated KV headers = 3; bytes message = 4; }
+message HProduceResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message BeginTxRequest { uint32 correlation_id = 1; string route = 2; }
+message BeginTxResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message TxProduceRequest { uint32 correlation_id = 1; bytes message = 2; }
+message TxProduceResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message TxHProduceRequest { uint32 correlation_id = 1; repeated KV headers = 2; bytes message = 3; }
+message TxHProduceResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message CommitTxRequest { uint32 correlation_id = 1; }
+message CommitTxResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message RollbackTxRequest { uint32 correlation_id = 1; }
+message RollbackTxResponse { uint32 correlation_id = 1; OperationError error = 2; }
+
+message SubscribeRequest { uint32 correlation_id = 1; string route = 2; bool auto_commit = 3; }
+message SubscribeResponse { uint32 correlation_id = 1; OperationError error = 2; uint32 subscription_id = 3; }
+message HSubscribeRequest { uint32 correlation_id = 1; string route = 2; bool auto_commit = 3; }
+message HSubscribeResponse { uint32 correlation_id = 1; OperationError error = 2; uint32 subscription_id = 3; }
+message UnsubscribeRequest { uint32 correlation_id = 1; uint32 subscription_id = 2; }
+message UnsubscribeResponse { uint32 correlation_id = 1; OperationError error = 2; }
+message Message { uint32 subscription_id = 1; bytes message_id = 2; bytes payload = 3; }
+message HMessage { uint32 subscription_id = 1; bytes message_id = 2; repeated KV headers = 3; bytes payload = 4; }
+
+message FetchRequest { uint32 correlation_id = 1; string route = 2; bool auto_commit = 3; uint32 batch_size = 4; }
+message FetchResponse { uint32 correlation_id = 1; OperationError error = 2; uint32 subscription_id = 3; repeated FetchMessage messages = 4; }
+message FetchMessage { bytes message_id = 1; bytes payload = 2; }
+message HFetchRequest { uint32 correlation_id = 1; string route = 2; bool auto_commit = 3; uint32 batch_size = 4; }
+message HFetchResponse { uint32 correlation_id = 1; OperationError error = 2; uint32 subscription_id = 3; repeated HFetchMessage messages = 4; }
+message HFetchMessage { bytes message_id = 1; repeated KV headers = 2; bytes payload = 3; }
+
+message AckRequest { uint32 correlation_id = 1; repeated bytes message_ids = 2; uint32 subscription_id = 3; }
+message AckResponse { uint32 correlation_id = 1; OperationError error = 2; repeated AckMessageResult results = 3; }
+message AckMessageResult { bytes message_id = 1; OperationError error = 2; }
+message NackRequest { uint32 correlation_id = 1; repeated bytes message_ids = 2; uint32 subscription_id = 3; }
+message NackResponse { uint32 correlation_id = 1; OperationError error = 2; repeated NackMessageResult results = 3; }
+message NackMessageResult { bytes message_id = 1; OperationError error = 2; }
+
+service FujinService { rpc Stream(stream FujinRequest) returns (stream FujinResponse); }
+message FujinRequest {
+  oneof request {
+    BindRequest bind = 1; ProduceRequest produce = 2; SubscribeRequest subscribe = 3; UnsubscribeRequest unsubscribe = 4; AckRequest ack = 5; NackRequest nack = 6; HProduceRequest hproduce = 7; HSubscribeRequest hsubscribe = 8; FetchRequest fetch = 9; HFetchRequest hfetch = 10; BeginTxRequest begin_tx = 11; CommitTxRequest commit_tx = 12; RollbackTxRequest rollback_tx = 13; TxProduceRequest tx_produce = 14; TxHProduceRequest tx_hproduce = 15;
+  }
+}
+message FujinResponse {
+  oneof response {
+    BindResponse bind = 1; ProduceResponse produce = 2; SubscribeResponse subscribe = 3; UnsubscribeResponse unsubscribe = 4; Message message = 5; AckResponse ack = 6; NackResponse nack = 7; HProduceResponse hproduce = 8; HMessage hmessage = 9; HSubscribeResponse hsubscribe = 10; FetchResponse fetch = 11; HFetchResponse hfetch = 12; BeginTxResponse begin_tx = 13; CommitTxResponse commit_tx = 14; RollbackTxResponse rollback_tx = 15; TxProduceResponse tx_produce = 16; TxHProduceResponse tx_hproduce = 17;
+  }
+}

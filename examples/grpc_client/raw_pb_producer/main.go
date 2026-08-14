@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"time"
 
-	pb "github.com/fujin-io/fujin/public/proto/grpc/v1"
+	pb "github.com/fujin-io/fujin-go/grpc/v1/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -17,90 +17,61 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	// Connect to gRPC server
-	conn, err := grpc.NewClient("localhost:4849",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	conn, err := grpc.NewClient("localhost:4849", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+		log.Fatalf("connect: %v", err)
 	}
 	defer conn.Close()
 
-	client := pb.NewFujinServiceClient(conn)
-
-	// Open bidirectional stream
-	stream, err := client.Stream(ctx)
+	stream, err := pb.NewFujinServiceClient(conn).Stream(ctx)
 	if err != nil {
-		log.Fatalf("Failed to open stream: %v", err)
+		log.Fatalf("open stream: %v", err)
+	}
+	defer stream.CloseSend()
+
+	if err := stream.Send(&pb.FujinRequest{Request: &pb.FujinRequest_Bind{Bind: &pb.BindRequest{Connector: "connector"}}}); err != nil {
+		log.Fatalf("send bind: %v", err)
+	}
+	bind := mustReceive(stream).GetBind()
+	if bind == nil {
+		log.Fatal("unexpected bind response")
+	}
+	if bind.Error != nil {
+		log.Fatalf("bind: %s", bind.Error.Message)
 	}
 
-	// Start response reader goroutine
-	go func() {
-		for {
-			resp, err := stream.Recv()
-			if err != nil {
-				log.Printf("Receive error: %v", err)
-				return
-			}
-
-			switch r := resp.Response.(type) {
-			case *pb.FujinResponse_Bind:
-				if r.Bind.Error != "" {
-					log.Printf("Bind error: %s", r.Bind.Error)
-				} else {
-					fmt.Println("✓ Initialized Fujin gRPC server")
-				}
-			case *pb.FujinResponse_Produce:
-				if r.Produce.Error != "" {
-					log.Printf("Produce error (correlation_id=%d): %s",
-						r.Produce.CorrelationId, r.Produce.Error)
-				} else {
-					fmt.Printf("✓ Message produced (correlation_id=%d)\n",
-						r.Produce.CorrelationId)
-				}
-			}
-		}
-	}()
-
-	// Send CONNECT request
-	if err := stream.Send(&pb.FujinRequest{
-		Request: &pb.FujinRequest_Bind{
-			Bind: &pb.BindRequest{
-				ConfigOverrides: nil,
-			},
-		},
-	}); err != nil {
-		log.Fatalf("Failed to send bind: %v", err)
-	}
-
-	// Wait a bit for connection
-	time.Sleep(100 * time.Millisecond)
-
-	// Send messages
-	var correlationID uint32 = 2
-	ticker := time.NewTicker(1 * time.Second)
+	var correlationID uint32 = 1
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("\nShutting down...")
 			return
-		case <-ticker.C:
-			// Send message without headers
-			if err := stream.Send(&pb.FujinRequest{
-				Request: &pb.FujinRequest_Produce{
-					Produce: &pb.ProduceRequest{
-						CorrelationId: correlationID,
-						Topic:         "pub",
-						Message:       fmt.Appendf(nil, "Hello from gRPC at %s", time.Now().Format(time.RFC3339)),
-					},
-				},
-			}); err != nil {
-				log.Printf("Failed to send message: %v", err)
-				return
+		case now := <-ticker.C:
+			if err := stream.Send(&pb.FujinRequest{Request: &pb.FujinRequest_Produce{Produce: &pb.ProduceRequest{
+				CorrelationId: correlationID,
+				Route:         "pub",
+				Message:       fmt.Appendf(nil, "Hello from gRPC at %s", now.Format(time.RFC3339)),
+			}}}); err != nil {
+				log.Fatalf("send produce: %v", err)
 			}
+			response := mustReceive(stream).GetProduce()
+			if response == nil {
+				log.Fatal("unexpected produce response")
+			}
+			if response.Error != nil {
+				log.Fatalf("produce: %s", response.Error.Message)
+			}
+			fmt.Printf("produced correlation_id=%d\n", response.CorrelationId)
 			correlationID++
 		}
 	}
+}
+
+func mustReceive(stream pb.FujinService_StreamClient) *pb.FujinResponse {
+	response, err := stream.Recv()
+	if err != nil {
+		log.Fatalf("receive: %v", err)
+	}
+	return response
 }

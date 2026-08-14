@@ -6,17 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	v1 "github.com/fujin-io/fujin/public/proto/fujin/v1"
+	client "github.com/fujin-io/fujin-go"
+	"github.com/fujin-io/fujin-go/internal/nativeproto"
 	"github.com/quic-go/quic-go"
-)
-
-var (
-	ReadBufferSize = 512
-
-	DISCONNECT_REQ = []byte{byte(v1.OP_CODE_DISCONNECT)}
 )
 
 type Conn struct {
@@ -25,83 +21,104 @@ type Conn struct {
 	timeout time.Duration
 	wdl     time.Duration
 	closed  atomic.Bool
-
-	l *slog.Logger
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	l       *slog.Logger
 }
 
 func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config, opts ...Option) (*Conn, error) {
-	if tlsConf != nil {
+	if tlsConf == nil {
+		tlsConf = &tls.Config{}
+	} else {
 		tlsConf = tlsConf.Clone()
-		tlsConf.NextProtos = []string{v1.Version}
 	}
-
+	tlsConf.NextProtos = []string{nativeproto.Version}
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, quicConf)
 	if err != nil {
-		return nil, fmt.Errorf("quic: dial addr: %w", err)
+		return nil, fmt.Errorf("quic dial %s: %w", addr, err)
 	}
-
-	c := &Conn{
-		qconn:   conn,
-		timeout: 10 * time.Second,
-		wdl:     5 * time.Second,
-		l:       slog.Default(),
-	}
-
-	for _, opt := range opts {
-		opt(c)
-	}
-
-	go func() {
-		var pingBuf [1]byte
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if c.closed.Load() {
-					return
-				}
-				str, err := conn.AcceptStream(ctx)
-				if err != nil {
-					c.l.Error("ping: accept stream", "err", err)
-					continue
-				}
-
-				if err := handlePing(str, pingBuf[:]); err != nil {
-					c.l.Error("ping: handle ping", "err", err)
-					continue
-				}
-			}
+	controlCtx, cancel := context.WithCancel(context.Background())
+	c := &Conn{qconn: conn, timeout: 10 * time.Second, wdl: 5 * time.Second, cancel: cancel, l: slog.Default()}
+	for _, option := range opts {
+		if option != nil {
+			option(c)
 		}
-	}()
-
+	}
+	c.wg.Add(1)
+	go c.controlLoop(controlCtx)
 	return c, nil
 }
 
+func (c *Conn) Bind(ctx context.Context, connector string, opts ...client.BindOption) (client.Stream, error) {
+	if c.closed.Load() {
+		return nil, ErrConnClosed
+	}
+	ctx, cancel := c.operationContext(ctx)
+	defer cancel()
+	conf := &client.BindConfig{}
+	for _, option := range opts {
+		if option != nil {
+			option(conf)
+		}
+	}
+	stream, err := c.qconn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open session stream: %w", err)
+	}
+	if c.wdl > 0 {
+		_ = stream.SetWriteDeadline(time.Now().Add(c.wdl))
+		defer stream.SetWriteDeadline(time.Time{})
+	}
+	if _, err := stream.Write(nativeproto.Bind(connector, conf.Meta, conf.ConfigOverrides)); err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("write BIND: %w", err)
+	}
+	reader := nativeproto.NewReader(stream)
+	routes, err := reader.BindResponse()
+	if err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("read BIND: %w", err)
+	}
+	return newStream(c, stream, reader, routes), nil
+}
+
 func (c *Conn) Close() error {
-	// disconnect and close all streams
-	c.closed.Store(true)
-	if err := c.qconn.CloseWithError(0x0, ""); err != nil {
-		return fmt.Errorf("quic: close: %w", err)
+	if !c.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	c.cancel()
+	err := c.qconn.CloseWithError(0, "")
+	c.wg.Wait()
+	if err != nil {
+		return fmt.Errorf("close QUIC connection: %w", err)
 	}
 	return nil
 }
 
-func handlePing(str *quic.Stream, buf []byte) error {
-	defer str.Close()
+func (c *Conn) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok || c.timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, c.timeout)
+}
 
-	_, err := str.Read(buf[:])
-	if err == io.EOF {
-		buf[0] = byte(v1.RESP_CODE_PONG)
-		if _, err := str.Write(buf[:]); err != nil {
-			return fmt.Errorf("ping: write pong: %w", err)
+func (c *Conn) controlLoop(ctx context.Context) {
+	defer c.wg.Done()
+	for {
+		stream, err := c.qconn.AcceptStream(ctx)
+		if err != nil {
+			return
 		}
-		return nil
+		go func() {
+			defer stream.Close()
+			var request [1]byte
+			if _, err := io.ReadFull(stream, request[:]); err != nil || request[0] != nativeproto.OpPing {
+				return
+			}
+			_, _ = stream.Write([]byte{nativeproto.RespPong})
+		}()
 	}
-	if err != nil {
-		return fmt.Errorf("ping: read: %w", err)
-	}
-
-	return nil
 }
