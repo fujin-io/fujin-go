@@ -46,7 +46,7 @@ func TestServerCompatibility(t *testing.T) {
 		"-connector", "github.com/fujin-io/fujin/examples/plugins/connector/faker",
 		"-transport", "github.com/fujin-io/fujin/public/plugins/transport/quic",
 		"-tags", "fujin,grpc",
-		"-ldflags", "-X main.Version=v0.2.0",
+		"-ldflags", "-X main.Version=v0.5.0",
 		"-output", binary,
 	)
 	build.Dir = serverRoot
@@ -108,8 +108,8 @@ connectors:
 	require.NoError(t, nativeCompatibilityCheck(nativeAddr))
 	require.NoError(t, grpcCompatibilityCheck(grpcAddr))
 
-	require.Contains(t, serverOutput.String(), "version: v0.2.0")
-	require.Equal(t, "fujin/1", nativeproto.Version)
+	require.Contains(t, serverOutput.String(), "version: v0.5.0")
+	require.Equal(t, nativeproto.WireVersion(1), nativeproto.Version)
 }
 
 func nativeCompatibilityCheck(addr string) error {

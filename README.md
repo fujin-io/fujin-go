@@ -5,14 +5,14 @@
 ## Requirements
 
 - Go `1.25.1` or newer
-- A Fujin server compatible with `fujin-go v0.2.0`
+- Fujin server `v0.5.0` or newer for the native QUIC client
 
-The native protocol currently negotiates ALPN `fujin/1`. Native protocol changes are coordinated with Fujin server releases; use matching Fujin and `fujin-go` release lines.
+The native protocol uses version-independent QUIC ALPN `fujin`. Every session stream performs mandatory HELLO negotiation before BIND, selects byte wire version `1` (`fujin/1`), and exchanges diagnostic SDK/server build versions. This is incompatible with Fujin servers before `v0.5.0`.
 
 ## Install
 
 ```bash
-go get github.com/fujin-io/fujin-go@v0.2.0
+go get github.com/fujin-io/fujin-go@v0.3.0
 ```
 
 ## Choose a transport

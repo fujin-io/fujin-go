@@ -1,12 +1,31 @@
 package nativeproto
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
 	client "github.com/fujin-io/fujin-go"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHelloFrameCarriesVersionsAndClientBuild(t *testing.T) {
+	frame := Hello("fujin-go", "v1.2.3", Version)
+	want := []byte{OpHello, HelloFormat, 1, byte(Version)}
+	want = AppendString(want, "fujin-go")
+	want = AppendString(want, "v1.2.3")
+	require.Equal(t, want, frame)
+}
+
+func TestHelloResponseReturnsNegotiatedServerInfo(t *testing.T) {
+	response := []byte{RespHello, 0, HelloFormat, byte(Version)}
+	response = AppendString(response, "v0.5.0")
+
+	info, err := NewReader(bytes.NewReader(response)).HelloResponse()
+	require.NoError(t, err)
+	require.Equal(t, Version, info.ProtocolVersion)
+	require.Equal(t, []byte("v0.5.0"), info.ServerBuildVersion)
+}
 
 func TestProducePrefixMatchesCompleteFrame(t *testing.T) {
 	headers := []client.Header{

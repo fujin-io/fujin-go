@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,9 @@ import (
 	"github.com/fujin-io/fujin-go/internal/nativeproto"
 	"github.com/quic-go/quic-go"
 )
+
+var sdkBuild = detectSDKBuildVersion()
+var sdkHello = nativeproto.Hello("fujin-go", sdkBuild, nativeproto.Version)
 
 type Conn struct {
 	qconn *quic.Conn
@@ -32,7 +36,7 @@ func Dial(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.
 	} else {
 		tlsConf = tlsConf.Clone()
 	}
-	tlsConf.NextProtos = []string{nativeproto.Version}
+	tlsConf.NextProtos = []string{nativeproto.Protocol}
 	conn, err := quic.DialAddr(ctx, addr, tlsConf, quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("quic dial %s: %w", addr, err)
@@ -69,17 +73,52 @@ func (c *Conn) Bind(ctx context.Context, connector string, opts ...client.BindOp
 		_ = stream.SetWriteDeadline(time.Now().Add(c.wdl))
 		defer stream.SetWriteDeadline(time.Time{})
 	}
+	reader := nativeproto.NewReader(stream)
+	if _, err := stream.Write(sdkHello); err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("write HELLO: %w", err)
+	}
+	hello, err := reader.HelloResponse()
+	if err != nil {
+		_ = stream.Close()
+		return nil, fmt.Errorf("read HELLO: %w", err)
+	}
+	if c.l.Enabled(ctx, slog.LevelDebug) {
+		c.l.Debug("native protocol negotiated", "protocol_version", byte(hello.ProtocolVersion), "server_build", string(hello.ServerBuildVersion))
+	}
 	if _, err := stream.Write(nativeproto.Bind(connector, conf.Meta, conf.ConfigOverrides)); err != nil {
 		_ = stream.Close()
 		return nil, fmt.Errorf("write BIND: %w", err)
 	}
-	reader := nativeproto.NewReader(stream)
 	routes, err := reader.BindResponse()
 	if err != nil {
 		_ = stream.Close()
 		return nil, fmt.Errorf("read BIND: %w", err)
 	}
 	return newStream(c, stream, reader, routes), nil
+}
+
+func detectSDKBuildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	const modulePath = "github.com/fujin-io/fujin-go"
+	if info.Main.Path == modulePath && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	for _, dependency := range info.Deps {
+		if dependency.Path != modulePath {
+			continue
+		}
+		if dependency.Replace != nil {
+			dependency = dependency.Replace
+		}
+		if dependency.Version != "" && dependency.Version != "(devel)" {
+			return dependency.Version
+		}
+	}
+	return "dev"
 }
 
 func (c *Conn) Close() error {

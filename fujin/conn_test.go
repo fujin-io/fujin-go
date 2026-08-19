@@ -65,6 +65,7 @@ func (s *nativeTestServer) serve() error {
 func serveNativeSession(conn *quic.Conn, stream *quic.Stream, pingResult chan<- error) error {
 	defer stream.Close()
 	reader := bufio.NewReader(stream)
+	negotiated := false
 	for {
 		op, err := reader.ReadByte()
 		if err != nil {
@@ -74,7 +75,43 @@ func serveNativeSession(conn *quic.Conn, stream *quic.Stream, pingResult chan<- 
 			return err
 		}
 		switch op {
+		case nativeproto.OpHello:
+			format, err := reader.ReadByte()
+			if err != nil {
+				return err
+			}
+			if format != nativeproto.HelloFormat {
+				return fmt.Errorf("unexpected HELLO format %d", format)
+			}
+			count, err := reader.ReadByte()
+			if err != nil {
+				return err
+			}
+			supported := false
+			for range count {
+				version, err := reader.ReadByte()
+				if err != nil {
+					return err
+				}
+				supported = supported || nativeproto.WireVersion(version) == nativeproto.Version
+			}
+			if _, err := readNativeString(reader); err != nil {
+				return err
+			}
+			if _, err := readNativeString(reader); err != nil {
+				return err
+			}
+			if !supported {
+				return fmt.Errorf("client does not support protocol version %d", nativeproto.Version)
+			}
+			if err := writeNative(stream, nativeHelloResponse()); err != nil {
+				return err
+			}
+			negotiated = true
 		case nativeproto.OpBind:
+			if !negotiated {
+				return errors.New("BIND before HELLO")
+			}
 			if _, err := readNativeString(reader); err != nil {
 				return err
 			}
@@ -265,7 +302,12 @@ func nativeTLSConfigs(t testing.TB) (*tls.Config, *tls.Config) {
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	require.NoError(t, err)
 	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
-	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{nativeproto.Version}}, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{nativeproto.Version}}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{nativeproto.Protocol}}, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{nativeproto.Protocol}}
+}
+
+func nativeHelloResponse() []byte {
+	response := []byte{nativeproto.RespHello, 0, nativeproto.HelloFormat, byte(nativeproto.Version)}
+	return nativeproto.AppendString(response, "v-server")
 }
 
 func nativeBindResponse() []byte {
@@ -343,6 +385,7 @@ func appendNativeHeaders(dst []byte, headers []client.Header) []byte {
 	return nativeproto.AppendHeaders(dst, headers)
 }
 func writeNative(w io.Writer, payload []byte) error { _, err := w.Write(payload); return err }
+
 func readNativeUint32(r io.Reader) (uint32, error) {
 	var value [4]byte
 	_, err := io.ReadFull(r, value[:])

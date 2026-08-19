@@ -10,7 +10,15 @@ import (
 	fujin "github.com/fujin-io/fujin-go"
 )
 
-const Version = "fujin/1"
+type WireVersion byte
+
+const (
+	Protocol                = "fujin"
+	Version     WireVersion = 1
+	HelloFormat             = 1
+)
+
+const OpHello byte = 0
 
 const (
 	OpBind byte = 1 + iota
@@ -50,6 +58,7 @@ const (
 	RespBind
 	RespTxProduce
 	RespTxHProduce
+	RespHello byte = 19
 )
 
 const (
@@ -97,6 +106,21 @@ func headersSize(headers []fujin.Header) int {
 		size += 8 + len(header.Key) + len(header.Value)
 	}
 	return size
+}
+
+func Hello(clientName, clientBuild string, versions ...WireVersion) []byte {
+	frame := make([]byte, 0, 3+len(versions)+2*4+len(clientName)+len(clientBuild))
+	frame = append(frame, OpHello, HelloFormat, byte(len(versions)))
+	for _, version := range versions {
+		frame = append(frame, byte(version))
+	}
+	frame = AppendString(frame, clientName)
+	return AppendString(frame, clientBuild)
+}
+
+type HelloInfo struct {
+	ProtocolVersion    WireVersion
+	ServerBuildVersion []byte
 }
 
 func Bind(connector string, meta, overrides map[string]string) []byte {
@@ -191,15 +215,23 @@ func NewReader(r io.Reader) *Reader   { return &Reader{r: bufio.NewReaderSize(r,
 func (r *Reader) Byte() (byte, error) { return r.r.ReadByte() }
 
 func (r *Reader) Uint16() (uint16, error) {
-	var value [2]byte
-	_, err := io.ReadFull(r.r, value[:])
-	return binary.BigEndian.Uint16(value[:]), err
+	value, err := r.r.Peek(2)
+	if err != nil {
+		return 0, err
+	}
+	result := binary.BigEndian.Uint16(value)
+	_, err = r.r.Discard(2)
+	return result, err
 }
 
 func (r *Reader) Uint32() (uint32, error) {
-	var value [4]byte
-	_, err := io.ReadFull(r.r, value[:])
-	return binary.BigEndian.Uint32(value[:]), err
+	value, err := r.r.Peek(4)
+	if err != nil {
+		return 0, err
+	}
+	result := binary.BigEndian.Uint32(value)
+	_, err = r.r.Discard(4)
+	return result, err
 }
 
 func (r *Reader) Bytes() ([]byte, error) {
@@ -215,6 +247,25 @@ func (r *Reader) Bytes() ([]byte, error) {
 func (r *Reader) String() (string, error) {
 	value, err := r.Bytes()
 	return string(value), err
+}
+
+// BytesView returns a zero-copy view valid until the next read from Reader.
+func (r *Reader) BytesView() ([]byte, error) {
+	size, err := r.Uint32()
+	if err != nil {
+		return nil, err
+	}
+	if uint64(size) > uint64(r.r.Size()) {
+		return nil, fmt.Errorf("zero-copy field size %d exceeds reader buffer", size)
+	}
+	value, err := r.r.Peek(int(size))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.r.Discard(int(size)); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func (r *Reader) Status() (*fujin.OperationError, error) {
@@ -277,6 +328,42 @@ func (r *Reader) Headers() ([]fujin.Header, error) {
 		headers = append(headers, fujin.Header{Key: key, Value: value})
 	}
 	return headers, nil
+}
+
+func (r *Reader) HelloResponse() (HelloInfo, error) {
+	op, err := r.Byte()
+	if err != nil {
+		return HelloInfo{}, err
+	}
+	if op != RespHello {
+		return HelloInfo{}, fmt.Errorf("unexpected HELLO response opcode %d", op)
+	}
+	operationErr, err := r.Status()
+	if err != nil {
+		return HelloInfo{}, err
+	}
+	if operationErr != nil {
+		return HelloInfo{}, operationErr
+	}
+	format, err := r.Byte()
+	if err != nil {
+		return HelloInfo{}, err
+	}
+	if format != HelloFormat {
+		return HelloInfo{}, fmt.Errorf("unsupported HELLO response format %d", format)
+	}
+	version, err := r.Byte()
+	if err != nil {
+		return HelloInfo{}, err
+	}
+	if WireVersion(version) != Version {
+		return HelloInfo{}, fmt.Errorf("server selected unsupported protocol version %d", version)
+	}
+	serverBuild, err := r.BytesView()
+	if err != nil {
+		return HelloInfo{}, err
+	}
+	return HelloInfo{ProtocolVersion: WireVersion(version), ServerBuildVersion: serverBuild}, nil
 }
 
 func (r *Reader) BindResponse() (map[string]fujin.RouteCapabilities, error) {
